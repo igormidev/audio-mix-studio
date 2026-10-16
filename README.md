@@ -12,6 +12,8 @@ Built for faceless YouTube channels, voiceovers, and anyone who has ever thought
 
 ## What you can do
 
+- **Work in project tabs.** Open several mixes, double-click a tab to rename it, and close/reopen tabs without losing their edits. All open tabs and the active tab recover after restart.
+- **Choose light or dark mode.** Use the top-right appearance button, or choose Light/Dark/System in settings. Larger text and stronger contrast keep both modes readable.
 - **Compare sentences, not entire files.** Preview variations side by side and choose which take goes into the master.
 - **Match meaning across scripts.** Codex groups the same idea even when the wording changes. Extra sentences become their own groups, with only the takes that contain them.
 - **Make precise manual edits.** See every source waveform and its sentence cuts. Click to mute or include a segment, use the scissors to split it, or edit its start and end time. Active segments are colored; muted ones are gray.
@@ -37,7 +39,7 @@ Open **Studio settings** to check all tools. If Codex is missing or signed out, 
 
 The transcription integration is adapted from [Vandashi](https://github.com/igormidev/Vandashi). It uses exactly the same WhisperX engine, CPU int8 inference, pinned model revisions, Silero speech detection, and word alignment. An existing verified Vandashi installation and downloaded model are reused read-only. Other downloads stay in Audio Mix Studio’s own cache. Vandashi does **not** need to be installed.
 
-The default model is `large-v3-turbo`. On a new Mac, select **Prepare selected model** in settings to install the engine and download it. A missing selected model is also prepared during transcription. The first setup needs internet access, several GB of free disk space, and time to download Python dependencies and model weights. English and other supported alignment languages may download a separate word-timing model the first time they are used.
+The default model is `large-v3-turbo`. On a new Mac, select **Prepare model** in settings to install the engine and download it. A missing selected model is also prepared during transcription. The first setup needs internet access, several GB of free disk space, and time to download Python dependencies and model weights. English and other supported alignment languages may download a separate word-timing model the first time they are used.
 
 Available models: `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`. Smaller models need less memory and may be less accurate. CPU transcription speed depends on your Mac and recording length.
 
@@ -68,6 +70,16 @@ npm run package:mac -- --arm64
 
 Outputs go into `release/`. Local builds are unsigned unless you configure your own Apple signing/notarization credentials. The repository does not include a signed/notarized public release or any credentials.
 
+## Project tabs
+
+Use **+** in the title bar (⌘N) for a new mix. Double-click its name to rename it; Enter saves the name and Escape cancels. Click **×** or press ⌘W to close it. The reopen icon or ⇧⌘T restores one of the last 20 closed tabs. Closing the last tab opens a blank mix.
+
+Each tab keeps its own selections, manual cuts, view, and undo history while open. Switching tabs stops audio from the previous tab. A busy tab stays open until its operation finishes or is cancelled. Transcription/model setup runs one job at a time; imports, saves, and exports can run in other tabs. Background results update their original tab.
+
+Explicit Save still produces a portable project and audio folder. The workspace also saves all open and recently closed mix snapshots automatically. A copied portable project opens independently; opening the same file again focuses its existing tab. Undo history is retained when closing/reopening during the same app session, while restart restores the saved edits.
+
+![Dark mode with project tabs](docs/screenshots/dark-mode.png)
+
 ## Your first mix
 
 1. **Import your takes.** Select one or more audio files or drop them into the window. WAV, MP3, M4A, AAC, FLAC, OGG, Opus, AIFF, and other common audio formats are supported. Imports are local copies; originals stay untouched.
@@ -76,7 +88,7 @@ Outputs go into `release/`. Local builds are unsigned unless you configure your 
 4. **Polish if needed.** In **Manual edit**, click a segment to toggle it. Use **Cut** and click inside a segment to split. Click or right-click a segment for exact start/end controls. Zoom for more precise placement.
 5. **Export master.** Choose WAV for editing in your video app, or MP3 for a smaller file. Save the project if you want to return later.
 
-Try **Explore a sample project** on the empty screen for three real, locally synthesized takes with shared and unique sentences. Demo groups are prepared examples; they are labeled as a demo and do not imply an AI analysis ran.
+Try **Open sample project** on the empty screen for three real, locally synthesized takes with shared and unique sentences. Demo groups are prepared examples; they are labeled as a demo and do not imply an AI analysis ran.
 
 ![Manual audio editing in Audio Mix Studio](docs/screenshots/manual-edit.png)
 
@@ -90,16 +102,20 @@ Try **Explore a sample project** on the empty screen for three real, locally syn
 
 ### Keyboard shortcuts
 
-| Shortcut | Action                         |
-| -------- | ------------------------------ |
-| Space    | Play/pause master              |
-| ⌘I       | Import audio                   |
-| ⌘O       | Open project                   |
-| ⌘S / ⌘⇧S | Save / Save as                 |
-| ⌘E       | Export master                  |
-| ⌘Z / ⌘⇧Z | Undo / Redo                    |
-| C        | Toggle cut tool in Manual edit |
-| Escape   | Stop playback / leave cut mode |
+| Shortcut  | Action                         |
+| --------- | ------------------------------ |
+| Space     | Play/pause master              |
+| ⌘N        | New project tab                |
+| ⌘W        | Close project tab              |
+| ⇧⌘T       | Reopen closed tab              |
+| ⇧⌘] / ⇧⌘[ | Next / previous project tab    |
+| ⌘I        | Import audio                   |
+| ⌘O        | Open project                   |
+| ⌘S / ⌘⇧S  | Save / Save as                 |
+| ⌘E        | Export master                  |
+| ⌘Z / ⌘⇧Z  | Undo / Redo                    |
+| C         | Toggle cut tool in Manual edit |
+| Escape    | Stop playback / leave cut mode |
 
 ## Your files and privacy
 
@@ -110,9 +126,12 @@ App data lives at:
 ```text
 ~/Library/Application Support/Audio Mix Studio/
   media/                 imported normalized audio and media index
-  last-session.json      autosaved editing session and full transcripts
+  workspace-session.json open/closed mixes, active tab, theme, and transcripts
+  last-session.json      previous-version session, retained during migration
   transcription/         Python runtime, model downloads, and cache
 ```
+
+Upgrading from the single-project version preserves and migrates the previous session. If an existing workspace is unreadable, the app preserves an exclusive recovery copy before replacing it with a new snapshot.
 
 Explicit **Save** creates `My mix.mixstudio` and `My mix.assets/` beside it. Keep both together when moving or backing up a project. The JSON contains your transcript and selections; the assets folder contains copied source audio. Saved portable projects do not depend on the original download folder or the app’s media cache.
 
@@ -133,10 +152,11 @@ npm run check       # strict TypeScript, ESLint, production build
 npm test            # domain, edit history, playback planning, real FFmpeg, adapters
 npx tsx scripts/smoke-electron.ts  # production Electron IPC/media, isolated profile
 npx tsx scripts/smoke-ui.ts        # real sentence/manual editor interactions
+npx tsx scripts/smoke-tabs.ts      # tabs, background ownership, themes, restart, exact export
 npx tsx scripts/smoke-installed.ts # installed /Applications bundle, minimal Finder PATH
 ```
 
-FFmpeg tests exercise real generated audio, including clip-order frequency checks and WAV/MP3 durations. Adapter tests reject invalid/incomplete AI ranges and verify download/cancellation handling. The native smoke run keeps Chromium’s OS sandbox enabled and uses the production media protocol. Only native dialog answers are replaced by the test harness.
+FFmpeg tests exercise real generated audio, including clip-order frequency checks and WAV/MP3 durations. Adapter tests reject invalid/incomplete AI ranges and verify download/cancellation handling. Tab verification covers separate undo histories, background-operation ownership, rename, close/reopen, theme restoration, and byte-identical WAV output across restart. Native smoke runs keep Chromium’s OS sandbox enabled and use the production media protocol. The media smoke replaces native dialog answers; the tab smoke also holds controlled analysis and setup replies to verify background ownership and the model-setup cancel button without downloading a model.
 
 The initial implementation was verified on an Apple Silicon Mac with the actual installed WhisperX and authenticated Codex CLI: two locally generated speech takes, default-model transcription/word alignment, semantic paraphrase matching, and a sentence unique to one take. A previously missing `tiny` model was downloaded with progress, verified, loaded, and discovered. A completely new multi-GB Python environment installation was not repeated on that already configured Mac.
 

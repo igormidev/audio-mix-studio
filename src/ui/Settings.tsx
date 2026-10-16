@@ -3,12 +3,16 @@ import {
   Download,
   ExternalLink,
   LoaderCircle,
+  Monitor,
+  Moon,
   RefreshCw,
+  Sun,
   X,
 } from "lucide-react";
 import type {
   DependencyStatus,
   MixProject,
+  StudioTheme,
   TranscriptionModel,
 } from "../shared/types";
 import { transcriptionModels } from "../shared/types";
@@ -16,7 +20,10 @@ export function Settings({
   project,
   status,
   busy,
+  theme,
+  onThemeChange,
   onClose,
+  onCancel,
   onChangeModel,
   onFade,
   onSetup,
@@ -26,7 +33,10 @@ export function Settings({
   project: MixProject;
   status: DependencyStatus | null;
   busy: boolean;
+  theme: StudioTheme;
+  onThemeChange: (theme: StudioTheme) => void;
   onClose: () => void;
+  onCancel?: () => void;
   onChangeModel: (model: TranscriptionModel) => void;
   onFade: (n: number) => void;
   onSetup: () => void;
@@ -46,10 +56,7 @@ export function Settings({
         }}
       >
         <header>
-          <div>
-            <span className="eyebrow">YOUR LOCAL STUDIO</span>
-            <h2 id="settings-title">Studio settings</h2>
-          </div>
+          <h2 id="settings-title">Studio settings</h2>
           <button
             autoFocus
             className="icon-button"
@@ -61,11 +68,30 @@ export function Settings({
           </button>
         </header>
         <div className="setting-section">
+          <h3>Appearance</h3>
+          <div className="theme-picker" role="group" aria-label="Appearance">
+            {(
+              [
+                ["light", "Light", Sun],
+                ["dark", "Dark", Moon],
+                ["system", "System", Monitor],
+              ] as const
+            ).map(([value, label, Icon]) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={theme === value}
+                onClick={() => onThemeChange(value)}
+              >
+                <Icon size={16} />
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="setting-section">
           <h3>Transcription</h3>
-          <p>
-            WhisperX runs on your Mac. The default is large-v3-turbo; smaller
-            models use less memory.
-          </p>
+          <p>Local WhisperX. Smaller models use less memory.</p>
           <label className="field-label" htmlFor="transcription-model">
             WhisperX model
           </label>
@@ -109,7 +135,7 @@ export function Settings({
             ) : (
               <Download size={15} />
             )}
-            Prepare selected model
+            Prepare model
           </button>
         </div>
         <div className="setting-section">
@@ -151,9 +177,8 @@ export function Settings({
             </div>
           ))}
           <p className="privacy-note">
-            Audio and transcription stay local. Sentence grouping sends
-            transcript text to Codex using your signed-in account. No audio is
-            uploaded.
+            Audio stays on your Mac. Grouping sends transcript text to your
+            signed-in Codex account.
           </p>
         </div>
         <div className="setting-section">
@@ -176,10 +201,7 @@ export function Settings({
               ms
             </span>
           </label>
-          <p>
-            A tiny fade reduces clicks at cuts. It does not overlap sentences or
-            change the mix duration.
-          </p>
+          <p>Reduces clicks without changing the mix duration.</p>
         </div>
         <footer>
           <button
@@ -189,9 +211,20 @@ export function Settings({
           >
             Export alignment JSON
           </button>
-          <button className="button primary" disabled={busy} onClick={onClose}>
-            Done
-          </button>
+          <div className="settings-footer-actions">
+            {busy && onCancel && (
+              <button className="button secondary" onClick={onCancel}>
+                Cancel operation
+              </button>
+            )}
+            <button
+              className="button primary"
+              disabled={busy}
+              onClick={onClose}
+            >
+              Done
+            </button>
+          </div>
         </footer>
       </section>
     </div>

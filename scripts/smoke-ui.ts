@@ -19,7 +19,7 @@ const errors: string[] = [];
 try {
   const page = await app.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.getByRole("button", { name: /Explore a sample project/ }).click();
+  await page.getByRole("button", { name: /Open sample project/ }).click();
   await expect(page.locator(".sentence-row")).toHaveCount(4, {
     timeout: 90_000,
   });
@@ -104,6 +104,8 @@ try {
   const current = Number(await startField.inputValue());
   await startField.fill((current + 0.02).toFixed(3));
   await page.getByRole("button", { name: "Apply trim" }).click();
+  if (await page.locator(".error-banner").count())
+    throw new Error(await page.locator(".error-banner").innerText());
   await expect(page.locator(".error-banner")).toHaveCount(0);
   await page.getByRole("button", { name: "Close segment controls" }).click();
   if (await noticeDismiss.count()) await noticeDismiss.click();
@@ -168,9 +170,9 @@ try {
     .getByRole("button", { name: "Export master", exact: true })
     .click();
   await page.getByRole("button", { name: /WAV audio/ }).click();
-  await expect(
-    page.getByText("Master exported as WAV. Ready for your video."),
-  ).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("Exported WAV.")).toBeVisible({
+    timeout: 30_000,
+  });
   const ffprobe = await findBinary("ffprobe");
   const probe = await runProcess(ffprobe, [
     "-v",
@@ -190,9 +192,12 @@ try {
   if (errors.length) throw new Error(errors.join("\n"));
   await page.waitForTimeout(250);
   const autosave = JSON.parse(
-    await readFile(path.join(temporary, "profile/last-session.json"), "utf8"),
+    await readFile(
+      path.join(temporary, "profile/workspace-session.json"),
+      "utf8",
+    ),
   );
-  if (autosave.segments.length !== 10)
+  if (autosave.projects[0].segments.length !== 10)
     throw new Error("Edited project was not autosaved.");
   await app.close();
   app = await electron.launch({

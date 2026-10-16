@@ -269,6 +269,48 @@ describe("Web Audio playback scheduling", () => {
     context.currentTime = 20;
     expect(context.sources).toHaveLength(2); // Audio source scheduling is independent of RAF.
   });
+  it("starts the first decoded section while a slower second section prepares", async () => {
+    const original = source();
+    const p = splitSegment(original, original.segments[0].id, 5);
+    const second = deferred();
+    audioSlice.mockImplementation((_id, start, end) =>
+      start === 5 ? second.promise : Promise.resolve(pcm(end - start)),
+    );
+    const test = runner(p);
+    test.render().previewMany(p.segments);
+    await settle();
+    const context = TestContext.instances[0];
+    expect(audioSlice).toHaveBeenCalledWith("a", 5, 12);
+    expect(context.sources).toHaveLength(1);
+    expect(context.sources[0].start).toHaveBeenCalledWith(0.035, 0, 5);
+    expect(test.render().preparing).toBe(false);
+    expect(frames.size).toBe(0); // Previews need no master-cursor animation.
+
+    context.currentTime = 0.5;
+    second.resolve(pcm(7));
+    await settle();
+    expect(context.sources[1].start).toHaveBeenCalledWith(5.035, 0, 7);
+    expect(test.errors).not.toHaveBeenCalled();
+  });
+  it("keeps source order when the second section decodes before the first", async () => {
+    const original = source();
+    const p = splitSegment(original, original.segments[0].id, 5);
+    const first = deferred();
+    audioSlice.mockImplementation((_id, start, end) =>
+      start === 0 ? first.promise : Promise.resolve(pcm(end - start)),
+    );
+    const test = runner(p);
+    test.render().previewMany(p.segments);
+    await settle();
+    const context = TestContext.instances[0];
+    expect(context.sources).toHaveLength(0);
+    context.currentTime = 2;
+    first.resolve(pcm(5));
+    await settle();
+    expect(context.sources[0].start).toHaveBeenCalledWith(2.035, 0, 5);
+    expect(context.sources[1].start).toHaveBeenCalledWith(7.035, 0, 7);
+    expect(test.errors).not.toHaveBeenCalled();
+  });
   it("seeks the master through source offsets and computes its cursor from the audio clock", async () => {
     const original = source();
     let p = splitSegment(original, original.segments[0].id, 5);
@@ -307,6 +349,54 @@ describe("Web Audio playback scheduling", () => {
     expect(test.render().previewId).toBe(next.id);
     expect(test.render().playing).toBe(true);
     expect(test.errors).not.toHaveBeenCalled();
+  });
+  it("ignores a stale lookahead failure after another take starts", async () => {
+    const original = source();
+    const p = splitSegment(original, original.segments[0].id, 5);
+    const second = deferred();
+    audioSlice.mockImplementation((_id, start, end) =>
+      start === 5 ? second.promise : Promise.resolve(pcm(end - start)),
+    );
+    const test = runner(p);
+    test.render().previewMany(p.segments);
+    await settle();
+    const next = { ...p.segments[0], id: "new-take", start: 1, end: 3 };
+    test.render().preview(next);
+    await settle();
+    second.reject(new Error("An obsolete lookahead failed."));
+    await settle();
+    expect(test.render().previewId).toBe(next.id);
+    expect(test.render().playing).toBe(true);
+    expect(test.errors).not.toHaveBeenCalled();
+  });
+  it("limits visual updates while continuing to read the audio clock", async () => {
+    const test = runner(source());
+    test.render().playMaster();
+    await settle();
+    const context = TestContext.instances[0];
+    context.currentTime = 0.535;
+    tick();
+    expect(test.render().position).toBeCloseTo(0.5);
+    context.currentTime = 0.545;
+    tick();
+    expect(test.render().position).toBeCloseTo(0.5);
+    context.currentTime = 0.575;
+    tick();
+    expect(test.render().position).toBeCloseTo(0.54);
+  });
+  it("captures the audio clock on pause between visual updates", async () => {
+    const test = runner(source());
+    test.render().playMaster();
+    await settle();
+    const context = TestContext.instances[0];
+    context.currentTime = 0.535;
+    tick();
+    context.currentTime = 0.55;
+    test.render().stop();
+    expect(test.render().position).toBeCloseTo(0.515);
+    test.render().playMaster();
+    await settle();
+    expect(audioSlice).toHaveBeenLastCalledWith("a", 0.515, 12);
   });
   it("reports current decode errors and suppresses stale failures after stopping", async () => {
     const p = source();

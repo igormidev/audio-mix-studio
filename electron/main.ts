@@ -8,7 +8,15 @@ import {
   shell,
   nativeTheme,
 } from "electron";
-import { readFile, mkdir, lstat, stat, rename, rm } from "node:fs/promises";
+import {
+  readFile,
+  mkdir,
+  lstat,
+  stat,
+  rename,
+  rm,
+  realpath,
+} from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
@@ -20,6 +28,7 @@ import type {
   TranscriptionModel,
   AudioTrack,
   AnalysisGroup,
+  StudioTheme,
 } from "../src/shared/types";
 import { transcriptionModels } from "../src/shared/types";
 import {
@@ -46,6 +55,7 @@ import {
   findBinary,
   decodeAudioSlice,
 } from "./media";
+import { checkedTheme, ProjectTaskQueue, WorkspaceStore } from "./workspace";
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -71,14 +81,19 @@ let window: BrowserWindow | null = null;
 let media: MediaStore;
 let cacheDirectory: string;
 let autosaveFile: string;
+let workspace: WorkspaceStore;
+let workspaceMode = false;
 let currentProject: MixProject | null = null;
 let persistenceQueue: Promise<void> = Promise.resolve();
+const fileOperations = new ProjectTaskQueue();
 let quitting = false;
 let readyToQuit = false;
 let closing = false;
 let operation: AbortController | null = null;
+let operationProjectId: string | undefined;
 let operationCompletion: Promise<unknown> | null = null;
 const projectPaths = new Map<string, string>();
+const canonicalProjectPaths = new Map<string, string>();
 const previewControllers = new Set<AbortController>();
 const previewTasks = new Set<Promise<ArrayBuffer>>();
 const previewQueue: (() => void)[] = [];
@@ -86,22 +101,36 @@ let activePreviews = 0;
 const devURL = process.env.VITE_DEV_SERVER_URL;
 const indexFile = path.resolve(__dirname, "../dist/index.html");
 
-function progress(value: OperationProgress | null) {
+type ProgressReporter = (value: OperationProgress) => void;
+function progress(value: OperationProgress | null, projectId?: string) {
   if (window && !window.isDestroyed())
-    window.webContents.send("studio:progress", value);
+    window.webContents.send(
+      "studio:progress",
+      value ? { ...value, projectId: value.projectId || projectId } : null,
+    );
 }
-async function withOperation<T>(action: (signal: AbortSignal) => Promise<T>) {
+async function withOperation<T>(
+  action: (signal: AbortSignal, report: ProgressReporter) => Promise<T>,
+  projectId?: string,
+) {
+  if (closing) throw new Error("The studio is closing.");
   if (operation)
     throw new Error(
       "An operation is already running. Wait for it to finish or cancel it first.",
     );
   const controller = new AbortController();
   operation = controller;
+  operationProjectId = projectId;
   const task = (async () => {
     try {
-      return await action(controller.signal);
+      return await action(controller.signal, (value) =>
+        progress(value, projectId),
+      );
     } finally {
-      if (operation === controller) operation = null;
+      if (operation === controller) {
+        operation = null;
+        operationProjectId = undefined;
+      }
       progress(null);
     }
   })();
@@ -111,6 +140,19 @@ async function withOperation<T>(action: (signal: AbortSignal) => Promise<T>) {
   } finally {
     if (operationCompletion === task) operationCompletion = null;
   }
+}
+function withFileOperation<T>(
+  action: (signal: AbortSignal, report: ProgressReporter) => Promise<T>,
+  projectId?: string,
+) {
+  if (closing) return Promise.reject(new Error("The studio is closing."));
+  return fileOperations.run(
+    (signal) =>
+      action(signal, (value) => {
+        if (!signal.aborted) progress(value, projectId);
+      }),
+    projectId,
+  );
 }
 function trustedSender(event: Electron.IpcMainInvokeEvent) {
   if (
@@ -130,6 +172,7 @@ function trustedSender(event: Electron.IpcMainInvokeEvent) {
 function handle(channel: string, listener: (...args: never[]) => unknown) {
   ipcMain.handle(channel, async (event, ...args) => {
     trustedSender(event);
+    if (closing) throw new Error("The studio is closing.");
     return listener(...(args as never[]));
   });
 }
@@ -152,33 +195,61 @@ function checkedModel(model: unknown): TranscriptionModel {
   return model as TranscriptionModel;
 }
 function remember(project: MixProject): Promise<void> {
+  // New renderer sessions own complete tab snapshots. A completed operation
+  // may concern a background tab, and must never replace that newer snapshot.
+  if (workspaceMode) return Promise.resolve();
   currentProject = project;
   persistenceQueue = persistenceQueue
     .catch(() => undefined)
     .then(() => atomicJSON(autosaveFile, project));
   return persistenceQueue;
 }
-async function importFiles(paths: unknown): Promise<AudioTrack[]> {
+function checkedProjectId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.length || value.length > 200)
+    throw new Error("Invalid mix tab identifier.");
+  return value;
+}
+function checkedImportPaths(paths: unknown): string[] {
   if (
     !Array.isArray(paths) ||
     !paths.length ||
     paths.length > 50 ||
-    paths.some((p) => typeof p !== "string")
+    paths.some((file) => typeof file !== "string")
   )
     throw new Error("Choose between 1 and 50 audio files.");
-  return withOperation(async (signal) => {
-    const tracks: AudioTrack[] = [];
-    for (const [index, file] of paths.entries()) {
-      tracks.push(
-        await media.importAudio(file, {
-          signal,
-          colorIndex: (currentProject?.tracks.length || 0) + index,
-          onProgress: (p) => progress({ ...p, fraction: index / paths.length }),
-        }),
-      );
-    }
-    return tracks;
-  });
+  return paths;
+}
+async function importFileBatch(
+  paths: string[],
+  signal: AbortSignal,
+  report: ProgressReporter,
+  projectId?: string,
+): Promise<AudioTrack[]> {
+  const tracks: AudioTrack[] = [];
+  const source = projectId ? workspace.project(projectId) : currentProject;
+  for (const [index, file] of paths.entries()) {
+    tracks.push(
+      await media.importAudio(file, {
+        signal,
+        colorIndex: (source?.tracks.length || 0) + index,
+        onProgress: (value) =>
+          report({ ...value, fraction: index / paths.length }),
+      }),
+    );
+  }
+  return tracks;
+}
+async function importFiles(
+  paths: unknown,
+  origin?: unknown,
+): Promise<AudioTrack[]> {
+  const checked = checkedImportPaths(paths);
+  const projectId = checkedProjectId(origin);
+  return withFileOperation(
+    (signal, report) => importFileBatch(checked, signal, report, projectId),
+    projectId,
+  );
 }
 const safeName = (name: string) =>
   name
@@ -209,6 +280,7 @@ async function saveProject(
       : `${choice.filePath}.mixstudio`;
   }
   const directory = `${path.basename(filename, ".mixstudio")}.assets`;
+  if (signal.aborted) throw new Error("Operation cancelled.");
   const assetDirectory = path.join(path.dirname(filename), directory);
   await mkdir(assetDirectory, { recursive: true });
   if (
@@ -229,6 +301,7 @@ async function saveProject(
     }
     assets[track.id] = `${directory}/${track.id}.wav`;
   }
+  if (signal.aborted) throw new Error("Operation cancelled.");
   await atomicJSON(filename, {
     format: "audio-mix-studio",
     version: 1,
@@ -236,35 +309,42 @@ async function saveProject(
     assets,
   });
   projectPaths.set(project.id, filename);
+  canonicalProjectPaths.set(project.id, await realpath(filename));
   await remember(project);
   return filename;
 }
-async function openProject() {
-  if (operation)
-    throw new Error(
-      "Wait for the current operation to finish or cancel it first.",
-    );
-  const choice = await dialog.showOpenDialog(window!, {
-    title: "Open a mix project",
-    properties: ["openFile"],
-    filters: [{ name: "Audio Mix Studio project", extensions: ["mixstudio"] }],
-  });
-  if (choice.canceled || !choice.filePaths[0]) return null;
-  const filename = choice.filePaths[0];
-  if ((await stat(filename)).size > 50 * 1024 * 1024)
-    throw new Error("The project file is too large.");
-  const raw = JSON.parse(await readFile(filename, "utf8"));
-  if (
-    raw.format !== "audio-mix-studio" ||
-    raw.version !== 1 ||
-    !raw.assets ||
-    typeof raw.assets !== "object"
-  )
-    throw new Error("This is not an Audio Mix Studio portable project.");
-  const project = parseProject(raw.project);
-  if (project.tracks.length > 50)
-    throw new Error("This project has more than 50 sources.");
-  return withOperation(async (signal) => {
+async function openProject(origin?: unknown) {
+  const projectId = checkedProjectId(origin);
+  return withFileOperation(async (signal, report) => {
+    const choice = await dialog.showOpenDialog(window!, {
+      title: "Open a mix project",
+      properties: ["openFile"],
+      filters: [
+        { name: "Audio Mix Studio project", extensions: ["mixstudio"] },
+      ],
+    });
+    if (choice.canceled || !choice.filePaths[0]) return null;
+    if (signal.aborted) throw new Error("Operation cancelled.");
+    const filename = choice.filePaths[0];
+    const canonical = await realpath(filename);
+    for (const [id, existingPath] of canonicalProjectPaths) {
+      if (existingPath !== canonical) continue;
+      const existing = workspace.project(id);
+      if (existing) return checkedProject(existing);
+    }
+    if ((await stat(filename)).size > 50 * 1024 * 1024)
+      throw new Error("The project file is too large.");
+    const raw = JSON.parse(await readFile(filename, "utf8"));
+    if (
+      raw.format !== "audio-mix-studio" ||
+      raw.version !== 1 ||
+      !raw.assets ||
+      typeof raw.assets !== "object"
+    )
+      throw new Error("This is not an Audio Mix Studio portable project.");
+    const project = parseProject(raw.project);
+    if (project.tracks.length > 50)
+      throw new Error("This project has more than 50 sources.");
     const idMap = new Map<string, string>();
     const imported: AudioTrack[] = [];
     for (const track of project.tracks) {
@@ -296,7 +376,7 @@ async function openProject() {
         signal,
         name: track.name,
         colorIndex: imported.length,
-        onProgress: progress,
+        onProgress: report,
       });
       idMap.set(track.id, cached.id);
       imported.push({ ...cached, transcript: track.transcript });
@@ -307,14 +387,21 @@ async function openProject() {
       trackId: idMap.get(segment.trackId)!,
     }));
     const checked = checkedProject(project);
+    if (signal.aborted) throw new Error("Operation cancelled.");
+    // The same saved document (or a copied manifest) may be opened twice.
+    // Each editor owns its own identity and Save destination; never redirect
+    // an existing tab's path mapping merely by opening a copy.
+    checked.id = randomUUID();
     projectPaths.set(checked.id, filename);
+    canonicalProjectPaths.set(checked.id, canonical);
     await remember(checked);
     return checked;
-  });
+  }, projectId);
 }
 
-async function demoProject(): Promise<MixProject> {
-  return withOperation(async (signal) => {
+async function demoProject(origin?: unknown): Promise<MixProject> {
+  const projectId = checkedProjectId(origin);
+  return withFileOperation(async (signal, report) => {
     const phrases = [
       [
         "Every great story starts with a single idea.",
@@ -344,7 +431,7 @@ async function demoProject(): Promise<MixProject> {
         let cursor = 0;
         const segments: { start: number; end: number; text: string }[] = [];
         for (const [n, text] of lines.entries()) {
-          progress({
+          report({
             phase: "importing",
             message: `Creating demo voice ${take + 1} of 3…`,
             fraction: (take + n / lines.length) / 3,
@@ -456,22 +543,28 @@ async function demoProject(): Promise<MixProject> {
     } finally {
       await rm(demoDirectory, { recursive: true, force: true });
     }
-  });
+  }, projectId);
 }
 
 function registerIPC() {
   handle("studio:dependencies", () => checkDependencies(cacheDirectory));
-  handle("studio:import", async () => {
-    if (operation)
-      throw new Error(
-        "Wait for the current operation to finish or cancel it first.",
-      );
-    const result = await dialog.showOpenDialog(window!, {
-      title: "Add voice takes",
-      properties: ["openFile", "multiSelections"],
-      filters: [{ name: "Audio files", extensions: AUDIO_EXTENSIONS }],
-    });
-    return result.canceled ? [] : importFiles(result.filePaths);
+  handle("studio:import", (origin?: unknown) => {
+    const projectId = checkedProjectId(origin);
+    return withFileOperation(async (signal, report) => {
+      const result = await dialog.showOpenDialog(window!, {
+        title: "Add voice takes",
+        properties: ["openFile", "multiSelections"],
+        filters: [{ name: "Audio files", extensions: AUDIO_EXTENSIONS }],
+      });
+      return result.canceled
+        ? []
+        : importFileBatch(
+            checkedImportPaths(result.filePaths),
+            signal,
+            report,
+            projectId,
+          );
+    }, projectId);
   });
   handle("studio:importPaths", importFiles);
   handle(
@@ -504,23 +597,27 @@ function registerIPC() {
       }
     },
   );
-  handle("studio:cancel", () => {
-    operation?.abort();
+  handle("studio:cancel", (origin?: unknown) => {
+    const projectId = checkedProjectId(origin);
+    if (projectId === undefined || operationProjectId === projectId)
+      operation?.abort();
+    fileOperations.cancel(projectId);
   });
-  handle("studio:setup", (value: unknown) =>
-    withOperation(async (signal) => {
+  handle("studio:setup", (value: unknown, origin?: unknown) => {
+    const projectId = checkedProjectId(origin);
+    return withOperation(async (signal, report) => {
       await setupTranscription(
         cacheDirectory,
         checkedModel(value),
-        progress,
+        report,
         signal,
       );
       return checkDependencies(cacheDirectory);
-    }),
-  );
-  handle("studio:analyze", (value: unknown) =>
-    withOperation(async (signal) => {
-      const project = checkedProject(value);
+    }, projectId);
+  });
+  handle("studio:analyze", (value: unknown) => {
+    const project = checkedProject(value);
+    return withOperation(async (signal, report) => {
       if (!project.tracks.length)
         throw new Error("Add audio before analyzing.");
       const dependencies = await checkDependencies(cacheDirectory);
@@ -530,7 +627,7 @@ function registerIPC() {
         );
       for (const [index, track] of project.tracks.entries()) {
         if (!track.transcript || track.transcript.model !== project.model) {
-          progress({
+          report({
             phase: "transcribing",
             message: `Transcribing take ${index + 1} of ${project.tracks.length}…`,
             trackId: track.id,
@@ -541,7 +638,7 @@ function registerIPC() {
             media.filename(track.id),
             cacheDirectory,
             project.model,
-            (p: OperationProgress) => progress({ ...p, trackId: track.id }),
+            (p: OperationProgress) => report({ ...p, trackId: track.id }),
             signal,
           );
         }
@@ -549,17 +646,21 @@ function registerIPC() {
       const alignment = await alignTranscripts(
         project.tracks,
         cacheDirectory,
-        progress,
+        report,
         signal,
       );
       const result = applyAlignment(project, alignment);
       await remember(result);
       return result;
-    }),
-  );
+    }, project.id);
+  });
   handle("studio:save", (value: unknown, saveAs: unknown) => {
     if (typeof saveAs !== "boolean") throw new Error("Invalid save option.");
-    return withOperation((signal) => saveProject(value, saveAs, signal));
+    const project = checkedProject(value);
+    return withFileOperation(
+      (signal) => saveProject(project, saveAs, signal),
+      project.id,
+    );
   });
   handle("studio:open", openProject);
   handle("studio:restore", async () => {
@@ -578,13 +679,37 @@ function registerIPC() {
   handle("studio:autosave", async (value: unknown) =>
     remember(checkedProject(value)),
   );
+  handle("studio:restoreWorkspace", async () => {
+    workspaceMode = true;
+    try {
+      return await workspace.restore();
+    } catch {
+      throw new Error(
+        "Your workspace could not be restored. Your saved files are unchanged; open a .mixstudio project to recover its audio.",
+      );
+    }
+  });
+  handle("studio:autosaveWorkspace", async (value: unknown) => {
+    if (closing) throw new Error("The studio is closing.");
+    // Validation occurs synchronously before the store adopts or queues it.
+    const pending = workspace.save(value);
+    workspaceMode = true;
+    currentProject = workspace.activeProject();
+    return pending;
+  });
+  handle("studio:setTheme", async (value: unknown) => {
+    const theme = checkedTheme(value);
+    nativeTheme.themeSource = theme;
+    window?.setBackgroundColor(themeBackground(theme));
+    await workspace.setTheme(theme);
+  });
   handle("studio:export", (value: unknown, format: unknown) => {
     const project = checkedProject(value);
     if (format !== "wav" && format !== "mp3")
       throw new Error("Choose WAV or MP3 export.");
     if (!masterClips(project).length)
       throw new Error("Choose at least one sentence to export.");
-    return withOperation(async (signal) => {
+    return withFileOperation(async (signal, report) => {
       const result = await dialog.showSaveDialog(window!, {
         title: "Export master audio",
         defaultPath: `${safeName(project.name)}.${format}`,
@@ -595,7 +720,7 @@ function registerIPC() {
       const filename = result.filePath.toLowerCase().endsWith(`.${format}`)
         ? result.filePath
         : `${result.filePath}.${format}`;
-      progress({
+      report({
         phase: "exporting",
         message: "Rendering your master…",
         fraction: 0,
@@ -609,7 +734,7 @@ function registerIPC() {
         {
           signal,
           onProgress: (fraction) =>
-            progress({
+            report({
               phase: "exporting",
               message: "Rendering your master…",
               fraction,
@@ -617,30 +742,33 @@ function registerIPC() {
         },
       );
       return filename;
-    });
+    }, project.id);
   });
   handle("studio:alignment", async (value: unknown) => {
     const project = checkedProject(value);
-    const result = await dialog.showSaveDialog(window!, {
-      title: "Export sentence alignment",
-      defaultPath: `${safeName(project.name)}-alignment.json`,
-      filters: [{ name: "JSON", extensions: ["json"] }],
-    });
-    if (result.canceled || !result.filePath) return null;
-    await atomicJSON(result.filePath, {
-      version: 1,
-      name: project.name,
-      tracks: project.tracks.map(({ id, name, duration, transcript }) => ({
-        id,
-        name,
-        duration,
-        transcript,
-      })),
-      groups: project.groups,
-      segments: project.segments,
-      master: masterClips(project),
-    });
-    return result.filePath;
+    return withFileOperation(async (signal) => {
+      const result = await dialog.showSaveDialog(window!, {
+        title: "Export sentence alignment",
+        defaultPath: `${safeName(project.name)}-alignment.json`,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (result.canceled || !result.filePath) return null;
+      if (signal.aborted) throw new Error("Operation cancelled.");
+      await atomicJSON(result.filePath, {
+        version: 1,
+        name: project.name,
+        tracks: project.tracks.map(({ id, name, duration, transcript }) => ({
+          id,
+          name,
+          duration,
+          transcript,
+        })),
+        groups: project.groups,
+        segments: project.segments,
+        master: masterClips(project),
+      });
+      return result.filePath;
+    }, project.id);
   });
   handle("studio:demo", demoProject);
   handle("studio:external", async (target: unknown) => {
@@ -655,6 +783,13 @@ function registerIPC() {
   });
 }
 
+function themeBackground(theme: StudioTheme) {
+  return theme === "dark" ||
+    (theme === "system" && nativeTheme.shouldUseDarkColors)
+    ? "#141b18"
+    : "#f7f8f6";
+}
+
 async function createWindow() {
   window = new BrowserWindow({
     title: "Audio Mix Studio",
@@ -662,9 +797,9 @@ async function createWindow() {
     height: 960,
     minWidth: 1024,
     minHeight: 720,
-    backgroundColor: "#f7f6f2",
+    backgroundColor: themeBackground(nativeTheme.themeSource),
     titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 19, y: 19 },
+    trafficLightPosition: { x: 18, y: 17 },
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -716,6 +851,16 @@ function createMenu() {
             label: "New mix",
             accelerator: "CmdOrCtrl+N",
             click: shortcut("new"),
+          },
+          {
+            label: "Close tab",
+            accelerator: "CmdOrCtrl+W",
+            click: shortcut("close-tab"),
+          },
+          {
+            label: "Reopen closed tab",
+            accelerator: "CmdOrCtrl+Shift+T",
+            click: shortcut("reopen-tab"),
           },
           {
             label: "Add audio…",
@@ -777,7 +922,22 @@ function createMenu() {
       },
       {
         label: "Window",
-        submenu: [{ role: "minimize" }, { role: "zoom" }, { role: "front" }],
+        submenu: [
+          {
+            label: "Next tab",
+            accelerator: "CmdOrCtrl+Shift+]",
+            click: shortcut("next-tab"),
+          },
+          {
+            label: "Previous tab",
+            accelerator: "CmdOrCtrl+Shift+[",
+            click: shortcut("previous-tab"),
+          },
+          { type: "separator" },
+          { role: "minimize" },
+          { role: "zoom" },
+          { role: "front" },
+        ],
       },
     ]),
   );
@@ -792,6 +952,22 @@ app
     await mkdir(cacheDirectory, { recursive: true });
     media = new MediaStore(root);
     await media.initialize();
+    workspace = new WorkspaceStore(root, checkedProject);
+    try {
+      const remembered = await workspace.restore();
+      if (remembered) {
+        nativeTheme.themeSource = remembered.theme;
+        currentProject =
+          remembered.projects.find(
+            (project) => project.id === remembered.activeProjectId,
+          ) || null;
+      }
+    } catch {
+      // The renderer offers recovery without preventing the app from opening.
+    }
+    nativeTheme.on("updated", () => {
+      window?.setBackgroundColor(themeBackground(nativeTheme.themeSource));
+    });
     protocol.handle("mixmedia", async (request) => {
       try {
         const url = new URL(request.url);
@@ -849,6 +1025,7 @@ app
   });
 app.on("window-all-closed", () => {
   operation?.abort();
+  fileOperations.cancel();
   app.quit();
 });
 app.on("before-quit", (event) => {
@@ -859,20 +1036,21 @@ app.on("before-quit", (event) => {
   closing = true;
   previewQueue.splice(0).forEach((resolve) => resolve());
   operation?.abort();
+  fileOperations.cancel();
   previewControllers.forEach((controller) => controller.abort());
   // Give cancelled child processes time to exit, then flush the latest edit before quitting.
-  const processes = Promise.allSettled([operationCompletion, ...previewTasks]);
+  const processes = Promise.allSettled([
+    operationCompletion,
+    fileOperations.flush(),
+    ...previewTasks,
+  ]);
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, 5000));
   const cleanup = Promise.all([
     Promise.race([processes, timeout]),
     persistenceQueue.catch(() => undefined),
+    workspace?.flush().catch(() => undefined),
   ]);
   void cleanup
-    .then(() =>
-      currentProject && autosaveFile
-        ? atomicJSON(autosaveFile, currentProject)
-        : undefined,
-    )
     .catch(() => undefined)
     .finally(() => {
       readyToQuit = true;

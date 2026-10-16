@@ -45,7 +45,7 @@ try {
     throw new Error(
       "Installed app could not find the actual tools/default model.",
     );
-  await page.getByRole("button", { name: /Explore a sample project/ }).click();
+  await page.getByRole("button", { name: /Open sample project/ }).click();
   await expect(page.locator(".sentence-row")).toHaveCount(4, {
     timeout: 90_000,
   });

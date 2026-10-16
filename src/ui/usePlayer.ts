@@ -44,7 +44,25 @@ export function usePlayer(
   const errorHandler = useRef(onError);
   errorHandler.current = onError;
 
+  const clockPosition = useCallback(() => {
+    const now = context.current?.currentTime ?? 0;
+    let value = positionRef.current;
+    for (const scheduled of sources.current.values()) {
+      if (now >= scheduled.start)
+        value = Math.max(
+          value,
+          scheduled.chunk.offset +
+            Math.min(scheduled.duration, now - scheduled.start),
+        );
+    }
+    return value;
+  }, []);
+
   const stop = useCallback(() => {
+    if (session.current.active && session.current.preview === null) {
+      positionRef.current = clockPosition();
+      setPosition(positionRef.current);
+    }
     generation.current++;
     if (seekTimer.current) clearTimeout(seekTimer.current);
     seekTimer.current = null;
@@ -65,7 +83,7 @@ export function usePlayer(
     setPlaying(false);
     setPreparing(false);
     setPreviewId(null);
-  }, []);
+  }, [clockPosition]);
 
   const playItems = useCallback(
     async (items: PlaybackItem[], from: number, preview: string | null) => {
@@ -82,7 +100,7 @@ export function usePlayer(
           context.current ??
           new AudioContext({
             sampleRate: PCM_SAMPLE_RATE,
-            latencyHint: "playback",
+            latencyHint: "interactive",
           });
         context.current = audio;
         // Resume during the initiating gesture, before waiting on the local decoder.
@@ -133,13 +151,12 @@ export function usePlayer(
           return request;
         };
 
-        // Decode a two-section lookahead without loading entire source takes.
-        const first = await Promise.all(plan.slice(0, 2).map(decode));
-        if (run !== generation.current) return;
-        const prepared = new Map(first.map((buffer, index) => [index, buffer]));
+        // Prepare a bounded lookahead, but do not make the first section wait
+        // for a slower second decode before it can begin playing.
+        const prepared = new Map<number, AudioBuffer>();
         const decoding = new Set<number>();
         let nextIndex = 0;
-        let nextStart = audio.currentTime + 0.035;
+        let nextStart: number | null = null;
         const fail = (error: unknown) => {
           if (run !== generation.current) return;
           stop();
@@ -168,7 +185,10 @@ export function usePlayer(
             prepared.delete(nextIndex++);
             const duration = Math.min(chunk.duration, buffer.duration);
             // A decoder stall resumes at the next sample instead of skipping speech.
-            const start = Math.max(nextStart, audio.currentTime + 0.015);
+            const start = Math.max(
+              nextStart ?? audio.currentTime + 0.035,
+              audio.currentTime + 0.015,
+            );
             const source = audio.createBufferSource();
             const gain = audio.createGain();
             source.buffer = buffer;
@@ -200,12 +220,15 @@ export function usePlayer(
           }
           if (nextIndex < plan.length && !sources.current.size)
             setPreparing(true);
-          if (
-            nextIndex < plan.length &&
-            !prepared.has(nextIndex) &&
-            !decoding.has(nextIndex)
+          // At most two scheduled sections and one decoded lookahead. A slow
+          // lookahead never blocks an already prepared earlier section.
+          const ahead = sources.current.size < 2 ? 2 : 1;
+          for (
+            let index = nextIndex;
+            index < Math.min(plan.length, nextIndex + ahead);
+            index++
           ) {
-            const index = nextIndex;
+            if (prepared.has(index) || decoding.has(index)) continue;
             decoding.add(index);
             void decode(plan[index])
               .then((buffer) => {
@@ -217,23 +240,16 @@ export function usePlayer(
               .catch(fail);
           }
         };
+        let lastVisualTime = Number.NEGATIVE_INFINITY;
         const tick = () => {
           if (run !== generation.current) return;
-          if (preview === null) {
-            let value = positionRef.current;
-            for (const scheduled of sources.current.values()) {
-              if (audio.currentTime >= scheduled.start)
-                value = Math.max(
-                  value,
-                  scheduled.chunk.offset +
-                    Math.min(
-                      scheduled.duration,
-                      audio.currentTime - scheduled.start,
-                    ),
-                );
-            }
+          // The audio clock remains sample-accurate. Updating the visual cursor
+          // at 30 Hz avoids rerendering the editor on every display refresh.
+          if (audio.currentTime - lastVisualTime >= 1 / 30) {
+            const value = clockPosition();
             positionRef.current = value;
             setPosition(value);
+            lastVisualTime = audio.currentTime;
           }
           frame.current = requestAnimationFrame(tick);
         };
@@ -242,7 +258,7 @@ export function usePlayer(
           setPosition(from);
         }
         pump();
-        frame.current = requestAnimationFrame(tick);
+        if (preview === null) frame.current = requestAnimationFrame(tick);
       } catch (error) {
         if (run === generation.current) {
           stop();
@@ -254,7 +270,7 @@ export function usePlayer(
         }
       }
     },
-    [stop, project.joinFadeMs],
+    [stop, project.joinFadeMs, clockPosition],
   );
 
   const playMaster = useCallback(

@@ -53,6 +53,14 @@ export interface MixProject {
   joinFadeMs: number;
   updatedAt: string;
 }
+export type StudioTheme = "light" | "dark" | "system";
+export interface WorkspaceSession {
+  version: 1;
+  projects: MixProject[];
+  activeProjectId: string;
+  theme: StudioTheme;
+  closedProjects?: MixProject[];
+}
 export interface MasterClip extends AudioSegment {
   offset: number;
   duration: number;
@@ -72,6 +80,7 @@ export interface DependencyStatus {
   models: { id: TranscriptionModel; downloaded: boolean }[];
 }
 export interface OperationProgress {
+  projectId?: string;
   phase:
     | "importing"
     | "installing"
@@ -85,16 +94,22 @@ export interface OperationProgress {
   trackId?: string;
 }
 export interface StudioAPI {
+  restoreWorkspace(): Promise<WorkspaceSession | null>;
+  autosaveWorkspace(session: WorkspaceSession): Promise<void>;
+  setTheme(theme: StudioTheme): Promise<void>;
   dependencies(): Promise<DependencyStatus>;
-  importAudio(): Promise<AudioTrack[]>;
-  importPaths(paths: string[]): Promise<AudioTrack[]>;
+  importAudio(projectId?: string): Promise<AudioTrack[]>;
+  importPaths(paths: string[], projectId?: string): Promise<AudioTrack[]>;
   audioSlice(trackId: string, start: number, end: number): Promise<ArrayBuffer>;
   pathForFile(file: File): string;
   analyze(project: MixProject): Promise<MixProject>;
-  setupTranscription(model: TranscriptionModel): Promise<DependencyStatus>;
-  cancel(): Promise<void>;
+  setupTranscription(
+    model: TranscriptionModel,
+    projectId?: string,
+  ): Promise<DependencyStatus>;
+  cancel(projectId?: string): Promise<void>;
   saveProject(project: MixProject, saveAs?: boolean): Promise<string | null>;
-  openProject(): Promise<MixProject | null>;
+  openProject(projectId?: string): Promise<MixProject | null>;
   restoreProject(): Promise<MixProject | null>;
   autosave(project: MixProject): Promise<void>;
   exportAudio(
@@ -102,7 +117,7 @@ export interface StudioAPI {
     format: "wav" | "mp3",
   ): Promise<string | null>;
   exportAlignment(project: MixProject): Promise<string | null>;
-  demoProject(): Promise<MixProject>;
+  demoProject(projectId?: string): Promise<MixProject>;
   openExternal(target: "codex" | "ffmpeg" | "whisperx"): Promise<void>;
   onProgress(
     listener: (progress: OperationProgress | null) => void,
