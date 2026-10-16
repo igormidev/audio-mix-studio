@@ -1,0 +1,82 @@
+{
+  "name": "audio-mix-studio",
+  "version": "0.1.0",
+  "description": "Pick your favorite sentence from every voice take. A local macOS narration editor powered by WhisperX and Codex.",
+  "author": "Igor Miranda Souza",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "tsc --noEmit && vite build && node scripts/build-electron.mjs",
+    "start": "electron .",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "test": "vitest run",
+    "check": "npm run format:check && npm run lint && npm run build",
+    "package:dir": "npm run build && electron-builder --dir --publish never",
+    "package:mac": "npm run build && electron-builder --mac --publish never",
+    "smoke": "tsx scripts/smoke-electron.ts && tsx scripts/smoke-ui.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@fontsource-variable/manrope": "^5.2.8",
+    "@fontsource/geist-mono": "^5.2.8",
+    "lucide-react": "^0.468.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.1.0",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.25.12",
+    "eslint": "^9.39.0",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "prettier": "^3.9.9",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.1",
+    "vite": "^7.3.0",
+    "vitest": "^4.0.6"
+  },
+  "build": {
+    "appId": "com.igormidev.audio-mix-studio",
+    "productName": "Audio Mix Studio",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json",
+      "LICENSE"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/transcription",
+        "to": "transcription"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.music",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon.icns",
+      "hardenedRuntime": true,
+      "extendInfo": {
+        "NSHumanReadableCopyright": "Copyright \u00a9 2026 Igor Miranda Souza. MIT License."
+      },
+      "minimumSystemVersion": "13.0"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+node_modules
+dist
+dist-electron
+release
+artifacts
+build
+package-lock.json
+resources/transcription

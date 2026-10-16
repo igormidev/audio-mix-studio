@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-electron/
+release/
+artifacts/
+.DS_Store
+*.mixstudio
+*.assets/
+*.log
+.env*
+!.env.example
+__pycache__/
+*.pyc
+build/icon.iconset/
