@@ -47,6 +47,7 @@ import type {
 } from "../shared/types";
 import {
   appendTracks,
+  appendSentenceAlternatives,
   chooseVariation,
   masterClips,
   masterDuration,
@@ -68,6 +69,10 @@ import { MasterTimeline } from "./MasterTimeline";
 import { JointDivider } from "./JointDivider";
 import type { EditorAction, EditorState } from "./editor";
 import { loadDependencies, rememberDependencies } from "./dependencies";
+
+type AudioDropTarget =
+  | { kind: "take"; zone: "empty" | "sidebar" | "master" | "manual" }
+  | { kind: "sentence"; groupId: string };
 
 export interface WorkspaceProps {
   editor: EditorState;
@@ -108,7 +113,7 @@ export const Workspace = memo(function Workspace({
   const [query, setQuery] = useState("");
   const [exportMenu, setExportMenu] = useState(false);
   const [confirmAlign, setConfirmAlign] = useState(false);
-  const [dragging, setDragging] = useState(false);
+  const [dropTarget, setDropTarget] = useState<AudioDropTarget | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [cutTool, setCutTool] = useState(false);
   const [zoom, setZoom] = useState(1);
@@ -124,7 +129,9 @@ export const Workspace = memo(function Workspace({
   busyRef.current = busy;
   const projectRef = useRef(project);
   projectRef.current = project;
-  const hasUnanalyzed = project.tracks.some((t) => !t.transcript);
+  const hasUnanalyzed = project.tracks.some(
+    (t) => !t.sentenceGroupId && !t.transcript,
+  );
 
   const adopt = useCallback(
     (next: MixProject, reset = false) => {
@@ -255,6 +262,23 @@ export const Workspace = memo(function Workspace({
       });
     },
     [run, adopt, status, project.id],
+  );
+  const addSentenceAudio = useCallback(
+    (groupId: string, paths?: string[]) => {
+      void run(async () => {
+        // Capture the row before opening a picker. A later active tab cannot
+        // redirect this operation, and a missing target is never a full import.
+        if (!projectRef.current.groups.some((g) => g.id === groupId))
+          throw new Error("That sentence is no longer available.");
+        const tracks = paths
+          ? await window.studio.importPaths(paths, project.id)
+          : await window.studio.importAudio(project.id);
+        if (!tracks.length) return;
+        adopt(appendSentenceAlternatives(projectRef.current, groupId, tracks));
+        setNotice("Audio choice added.");
+      });
+    },
+    [run, adopt, project.id],
   );
   const save = useCallback(
     (saveAs = false) => {
@@ -472,6 +496,25 @@ export const Workspace = memo(function Workspace({
       edit((p) => setJointOverride(p, left, right, settings)),
     [edit],
   );
+  useEffect(() => {
+    setDropTarget(null);
+  }, [active, busy, tab, settings, help, confirmAlign]);
+  const findDropTarget = (
+    target: EventTarget | null,
+  ): AudioDropTarget | null => {
+    if (!active || operation.current || settings || help || confirmAlign)
+      return null;
+    if (!project.tracks.length) return { kind: "take", zone: "empty" };
+    if (!(target instanceof Element)) return null;
+    const sentence = target.closest<HTMLElement>("[data-sentence-drop]");
+    if (sentence?.dataset.sentenceDrop)
+      return { kind: "sentence", groupId: sentence.dataset.sentenceDrop };
+    const region = target.closest<HTMLElement>("[data-full-take-drop]");
+    const zone = region?.dataset.fullTakeDrop;
+    if (zone === "sidebar" || zone === "master" || zone === "manual")
+      return { kind: "take", zone };
+    return null;
+  };
   const filteredGroups = project.groups.filter((group) =>
     `${group.text} ${group.note}`.toLowerCase().includes(query.toLowerCase()),
   );
@@ -484,26 +527,40 @@ export const Workspace = memo(function Workspace({
       id={`project-panel-${project.id}`}
       aria-labelledby={`project-tab-${project.id}`}
       onDragOver={(e) => {
-        if (e.dataTransfer.types.includes("Files")) {
-          e.preventDefault();
-          setDragging(true);
-        }
+        if (!e.dataTransfer.types.includes("Files")) return;
+        // Prevent Chromium from navigating to a dropped file even in regions
+        // that intentionally do not import audio.
+        e.preventDefault();
+        const target = findDropTarget(e.target);
+        e.dataTransfer.dropEffect = target ? "copy" : "none";
+        setDropTarget((previous) =>
+          JSON.stringify(previous) === JSON.stringify(target)
+            ? previous
+            : target,
+        );
       }}
       onDragLeave={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget as Node))
-          setDragging(false);
+          setDropTarget(null);
       }}
       onDrop={(e) => {
+        if (!e.dataTransfer.types.includes("Files")) return;
         e.preventDefault();
-        setDragging(false);
-        if (busy) return;
+        const target = findDropTarget(e.target);
+        setDropTarget(null);
+        if (!target) return;
         const paths = Array.from(e.dataTransfer.files)
           .map((file) => window.studio.pathForFile(file))
           .filter(Boolean);
-        if (paths.length) importAudio(paths);
+        if (!paths.length) return;
+        if (target.kind === "sentence") addSentenceAudio(target.groupId, paths);
+        else importAudio(paths);
       }}
     >
-      <aside className="sidebar">
+      <aside className="sidebar" data-full-take-drop="sidebar">
+        {dropTarget?.kind === "take" && dropTarget.zone === "sidebar" && (
+          <TakeDropOverlay />
+        )}
         <div className="brand">
           <span className="brand-icon">
             <AudioLines size={22} />
@@ -630,7 +687,14 @@ export const Workspace = memo(function Workspace({
         </div>
       </aside>
       <main>
-        <section className="master-section" aria-label="Master audio timeline">
+        <section
+          className="master-section"
+          aria-label="Master audio timeline"
+          data-full-take-drop="master"
+        >
+          {dropTarget?.kind === "take" && dropTarget.zone === "master" && (
+            <TakeDropOverlay />
+          )}
           <div className="master-heading">
             <div className="master-title">
               <span className="master-icon">
@@ -918,6 +982,11 @@ export const Workspace = memo(function Workspace({
                           onSkip={skip}
                           onMove={move}
                           onSpeed={changeSpeed}
+                          onAddAudio={addSentenceAudio}
+                          dropActive={
+                            dropTarget?.kind === "sentence" &&
+                            dropTarget.groupId === group.id
+                          }
                         />
                       </Fragment>
                     );
@@ -972,26 +1041,33 @@ export const Workspace = memo(function Workspace({
                     Muted
                   </span>
                 </div>
-                <div className="tracks-scroll">
-                  <div
-                    className="manual-tracks"
-                    style={{ minWidth: `${zoom * 100}%` }}
-                  >
-                    {project.tracks.map((track) => (
-                      <ManualTrack
-                        key={track.id}
-                        track={track}
-                        project={project}
-                        cutTool={cutTool}
-                        selected={selected}
-                        previewId={player.previewId}
-                        disabled={busy}
-                        onPreview={player.preview}
-                        onSelect={setSelected}
-                        onToggle={toggle}
-                        onCut={cut}
-                      />
-                    ))}
+                <div
+                  className="manual-drop-region"
+                  data-full-take-drop="manual"
+                >
+                  {dropTarget?.kind === "take" &&
+                    dropTarget.zone === "manual" && <TakeDropOverlay />}
+                  <div className="tracks-scroll">
+                    <div
+                      className="manual-tracks"
+                      style={{ minWidth: `${zoom * 100}%` }}
+                    >
+                      {project.tracks.map((track) => (
+                        <ManualTrack
+                          key={track.id}
+                          track={track}
+                          project={project}
+                          cutTool={cutTool}
+                          selected={selected}
+                          previewId={player.previewId}
+                          disabled={busy}
+                          onPreview={player.preview}
+                          onSelect={setSelected}
+                          onToggle={toggle}
+                          onCut={cut}
+                        />
+                      ))}
+                    </div>
                   </div>
                 </div>
                 {selectedSegment && (
@@ -1016,7 +1092,7 @@ export const Workspace = memo(function Workspace({
           </section>
         )}
       </main>
-      {active && dragging && (
+      {active && dropTarget?.kind === "take" && dropTarget.zone === "empty" && (
         <div className="drop-overlay">
           <div>
             <Upload size={36} />
@@ -1167,6 +1243,15 @@ export const Workspace = memo(function Workspace({
   );
 });
 
+function TakeDropOverlay() {
+  return (
+    <div className="take-drop-overlay" aria-hidden="true">
+      <Upload size={22} />
+      <span>Drop to add audio takes</span>
+    </div>
+  );
+}
+
 const SentenceRow = memo(function SentenceRow({
   group,
   index,
@@ -1178,6 +1263,8 @@ const SentenceRow = memo(function SentenceRow({
   onSkip,
   onMove,
   onSpeed,
+  onAddAudio,
+  dropActive,
 }: {
   group: SentenceGroup;
   index: number;
@@ -1189,6 +1276,8 @@ const SentenceRow = memo(function SentenceRow({
   onSkip: (groupId: string) => void;
   onMove: (groupId: string, direction: -1 | 1) => void;
   onSpeed: (groupId: string, speed: number) => void;
+  onAddAudio: (groupId: string, paths?: string[]) => void;
+  dropActive: boolean;
 }) {
   const segments = project.segments.filter((s) => s.groupId === group.id);
   const variations = project.tracks.flatMap((track) => {
@@ -1199,8 +1288,20 @@ const SentenceRow = memo(function SentenceRow({
   });
   const activeTracks = variations.filter((v) => v.parts.some((s) => s.enabled));
   const skipped = activeTracks.length === 0;
+  const eligibleTakes = project.tracks.filter(
+    (track) => !track.sentenceGroupId || track.sentenceGroupId === group.id,
+  ).length;
   return (
-    <article className={`sentence-row ${skipped ? "skipped" : ""}`}>
+    <article
+      className={`sentence-row ${skipped ? "skipped" : ""} ${dropActive ? "drop-active" : ""}`}
+      data-sentence-drop={group.id}
+    >
+      {dropActive && (
+        <div className="sentence-drop-overlay" aria-hidden="true">
+          <Plus size={19} />
+          <span>Drop to add a choice to sentence {index + 1}</span>
+        </div>
+      )}
       <div className="sentence-number">
         {String(index + 1).padStart(2, "0")}
         <div className="reorder">
@@ -1224,17 +1325,27 @@ const SentenceRow = memo(function SentenceRow({
         <div className="sentence-heading">
           <h3 title={group.note || undefined}>{group.text}</h3>
           <div className="sentence-tags">
-            {variations.length < project.tracks.length && (
+            {variations.length < eligibleTakes && (
               <span className="unique-badge">
                 {variations.length === 1
                   ? "Unique sentence"
-                  : `${variations.length} of ${project.tracks.length} takes`}
+                  : `${variations.length} of ${eligibleTakes} takes`}
               </span>
             )}
             {activeTracks.length > 1 && (
               <span className="custom-badge">Custom mix</span>
             )}
             {skipped && <span className="unique-badge">Skipped</span>}
+            <button
+              className="text-button sentence-add-audio"
+              disabled={disabled}
+              aria-label={`Add audio to sentence ${index + 1}`}
+              title="Add an audio choice to this sentence"
+              onClick={() => onAddAudio(group.id)}
+            >
+              <Plus size={13} />
+              Add audio
+            </button>
             <div
               className="sentence-speed"
               role="group"

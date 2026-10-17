@@ -26,6 +26,8 @@ export interface AudioTrack {
   peaks: number[];
   mediaUrl: string;
   transcript?: Transcript;
+  /** A local replacement choice for this sentence, never a complete-script take. */
+  sentenceGroupId?: string;
 }
 export interface AudioSegment {
   id: string;

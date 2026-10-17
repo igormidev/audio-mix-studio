@@ -2581,3 +2581,50 @@ kbd {
   background: var(--line);
   margin: 12px 0;
 }
+
+/* File drops have an explicit destination: a take region or one sentence. */
+.sidebar,
+.master-section,
+.manual-drop-region,
+.sentence-row {
+  position: relative;
+}
+.take-drop-overlay,
+.sentence-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border: 2px dashed var(--green);
+  border-radius: 7px;
+  color: var(--green-text);
+  background: color-mix(in srgb, var(--green-soft) 94%, transparent);
+  font-size: 13px;
+  font-weight: 650;
+  text-align: center;
+  padding: 12px;
+}
+.sidebar > .take-drop-overlay {
+  inset: 7px;
+  flex-direction: column;
+}
+.sentence-drop-overlay {
+  font-size: 12px;
+}
+.sentence-add-audio {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  color: var(--secondary);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px;
+}
+.sentence-add-audio:hover {
+  color: var(--green-text);
+}

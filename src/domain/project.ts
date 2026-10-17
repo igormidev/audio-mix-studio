@@ -188,6 +188,10 @@ export function appendTracks(
   const seen = new Set(project.tracks.map((track) => track.id));
   const tracks = incoming.map((track, index) => {
     const parsed = parseTrack(track, `Imported track ${index + 1}`);
+    if (parsed.sentenceGroupId !== undefined)
+      throw new Error(
+        "A sentence choice must be added to its target sentence.",
+      );
     if (seen.has(parsed.id))
       throw new Error(`Track ID is repeated: ${parsed.id}`);
     seen.add(parsed.id);
@@ -226,6 +230,64 @@ export function appendTracks(
     tracks: [...project.tracks, ...tracks],
     groups: [...project.groups, ...groups],
     segments: [...project.segments, ...segments],
+  });
+}
+
+/** Add full-length source alternatives without changing the current master choice. */
+export function appendSentenceAlternatives(
+  project: MixProject,
+  groupId: string,
+  incoming: AudioTrack[],
+): MixProject {
+  const group = project.groups.find((candidate) => candidate.id === groupId);
+  if (!group) throw new Error("The selected sentence no longer exists.");
+  if (!incoming.length) return project;
+  if (project.tracks.length + incoming.length > MAX_TRACKS)
+    throw new Error(`A project supports up to ${MAX_TRACKS} source tracks.`);
+  if (project.segments.length + incoming.length > MAX_SEGMENTS)
+    throw new Error("The project contains too many audio segments.");
+  const seen = new Set(project.tracks.map((track) => track.id));
+  const tracks = incoming.map((track, index) => {
+    const parsed = parseTrack(track, `Sentence audio ${index + 1}`);
+    if (seen.has(parsed.id))
+      throw new Error(`Track ID is repeated: ${parsed.id}`);
+    if (
+      parsed.sentenceGroupId !== undefined &&
+      parsed.sentenceGroupId !== groupId
+    )
+      throw new Error("This audio choice belongs to another sentence.");
+    seen.add(parsed.id);
+    return { ...parsed, sentenceGroupId: groupId };
+  });
+  const segments = tracks.map((track): AudioSegment => ({
+    id: id("segment"),
+    trackId: track.id,
+    groupId,
+    start: 0,
+    end: track.duration,
+    text: (
+      track.transcript?.segments
+        .map((segment) => segment.text)
+        .join(" ")
+        .trim() || track.name
+    ).slice(0, 20_000),
+    enabled: false,
+  }));
+  return updated({
+    ...project,
+    tracks: [...project.tracks, ...tracks],
+    segments: [...project.segments, ...segments],
+    groups: project.groups.map((candidate) =>
+      candidate.id === groupId
+        ? {
+            ...candidate,
+            segmentIds: [
+              ...candidate.segmentIds,
+              ...segments.map((segment) => segment.id),
+            ],
+          }
+        : candidate,
+    ),
   });
 }
 
@@ -538,7 +600,15 @@ export function applyAlignment(
   const inputGroups = array(root.groups, "Alignment groups", MAX_GROUPS);
   if (!inputGroups.length)
     throw new Error("The analysis did not return any sentences.");
-  const tracks = new Map(project.tracks.map((track) => [track.id, track]));
+  const tracks = new Map(
+    project.tracks
+      .filter((track) => track.sentenceGroupId === undefined)
+      .map((track) => [track.id, track]),
+  );
+  const scopedTracks = project.tracks.filter(
+    (track) => track.sentenceGroupId !== undefined,
+  );
+  const scopedTrackIds = new Set(scopedTracks.map((track) => track.id));
   const rank = new Map(project.tracks.map((track, index) => [track.id, index]));
   const previousGroups = new Map<string, SentenceGroup[]>();
   const previousEnabledTracks = new Map<string, Set<string>>();
@@ -552,6 +622,27 @@ export function applyAlignment(
   for (const group of project.groups) {
     const key = normalizedSentence(group.text);
     previousGroups.set(key, [...(previousGroups.get(key) ?? []), group]);
+  }
+  // Regrouping repeated labels by occurrence is unsafe after reordering groups.
+  // Preserve the old project unless a replacement's owner has a unique label.
+  for (const track of scopedTracks) {
+    const owner = project.groups.find(
+      (group) => group.id === track.sentenceGroupId,
+    );
+    if (!owner)
+      throw new Error("An audio choice refers to a missing sentence.");
+    const key = normalizedSentence(owner.text);
+    const oldCount = previousGroups.get(key)?.length ?? 0;
+    const newCount = inputGroups.filter((value) => {
+      const entry = object(value, "Sentence");
+      return (
+        normalizedSentence(string(entry.text, "Sentence text", 20_000)) === key
+      );
+    }).length;
+    if (oldCount > 1 || newCount > 1)
+      throw new Error(
+        "Regrouping cannot safely identify a repeated sentence with added audio. Remove its added audio choices before regrouping.",
+      );
   }
   const segments: AudioSegment[] = [];
   const groups: SentenceGroup[] = inputGroups.map((value, index) => {
@@ -575,7 +666,7 @@ export function applyAlignment(
     if (!variations.length)
       throw new Error(`Sentence ${index + 1} has no source audio.`);
     const seen = new Set<string>();
-    const pieces = variations
+    const pieces: AudioSegment[] = variations
       .map((value) => {
         const variation = object(value, "Sentence variation");
         exactKeys(
@@ -606,6 +697,16 @@ export function applyAlignment(
         };
       })
       .sort((a, b) => (rank.get(a.trackId) ?? 0) - (rank.get(b.trackId) ?? 0));
+    if (previous)
+      pieces.push(
+        ...project.segments
+          .filter(
+            (segment) =>
+              segment.groupId === previous.id &&
+              scopedTrackIds.has(segment.trackId),
+          )
+          .map((segment) => ({ ...segment })),
+      );
     const previousSelections = previous
       ? (previousEnabledTracks.get(previous.id) ?? new Set<string>())
       : undefined;
@@ -614,9 +715,10 @@ export function applyAlignment(
       (previousSelections.size === 0 ||
         pieces.some((piece) => previousSelections.has(piece.trackId)));
     pieces.forEach((piece, pieceIndex) => {
-      piece.enabled = retainSelection
-        ? previousSelections.has(piece.trackId)
-        : pieceIndex === 0;
+      if (!scopedTrackIds.has(piece.trackId))
+        piece.enabled = retainSelection
+          ? previousSelections.has(piece.trackId)
+          : pieceIndex === 0;
       group.segmentIds.push(piece.id);
       segments.push(piece);
     });
@@ -624,8 +726,13 @@ export function applyAlignment(
   });
   if (segments.length > MAX_SEGMENTS)
     throw new Error("The analysis returned too many audio segments.");
+  const ids = new Set(groups.map((group) => group.id));
+  if (scopedTracks.some((track) => !ids.has(track.sentenceGroupId!)))
+    throw new Error(
+      "Regrouping changed a sentence with added audio. Remove its added audio choices before regrouping.",
+    );
   ensureNoOverlap(segments);
-  for (const track of project.tracks) {
+  for (const track of tracks.values()) {
     const pieces = segments
       .filter((segment) => segment.trackId === track.id)
       .sort((a, b) => a.start - b.start);
@@ -639,7 +746,6 @@ export function applyAlignment(
     }));
     pieces.forEach((piece, index) => Object.assign(piece, boundaries[index]));
   }
-  const ids = new Set(groups.map((group) => group.id));
   const jointOverrides = Object.fromEntries(
     Object.entries(project.jointOverrides ?? {}).filter(([key]) => {
       const pair = JSON.parse(key) as string[];
@@ -671,7 +777,7 @@ function migrateLegacyBoundaries(
   const replacements = new Map<string, { start: number; end: number }>();
   const compact = (text: string) => normalizedSentence(text).replace(/\s/g, "");
   for (const track of tracks) {
-    if (!track.transcript) continue;
+    if (!track.transcript || track.sentenceGroupId !== undefined) continue;
     const pieces = segments
       .filter((segment) => segment.trackId === track.id)
       .sort((a, b) => a.start - b.start);
@@ -917,6 +1023,15 @@ function parseTrack(value: unknown, label: string): AudioTrack {
     peaks,
     mediaUrl: string(track.mediaUrl, `${label} media URL`, 16_384),
     ...(transcript ? { transcript } : {}),
+    ...(track.sentenceGroupId !== undefined
+      ? {
+          sentenceGroupId: string(
+            track.sentenceGroupId,
+            `${label} sentence ID`,
+            200,
+          ),
+        }
+      : {}),
   };
 }
 
@@ -1002,6 +1117,12 @@ export function parseProject(value: unknown): MixProject {
     "Sentences",
   );
   const groupMap = new Map(groups.map((group) => [group.id, group]));
+  for (const track of tracks)
+    if (
+      track.sentenceGroupId !== undefined &&
+      !groupMap.has(track.sentenceGroupId)
+    )
+      throw new Error("An audio choice refers to a missing sentence.");
   let segments: AudioSegment[] = array(
     input.segments,
     "Project segments",
@@ -1015,6 +1136,11 @@ export function parseProject(value: unknown): MixProject {
     const groupId = string(segment.groupId, "Segment sentence ID", 200);
     if (!groupMap.has(groupId))
       throw new Error("An audio segment refers to a missing sentence.");
+    if (
+      track.sentenceGroupId !== undefined &&
+      track.sentenceGroupId !== groupId
+    )
+      throw new Error("An audio choice is assigned to the wrong sentence.");
     const start = number(segment.start, "Segment start");
     const end = number(segment.end, "Segment end");
     validateRange(start, end, track.duration, "Audio segment");
@@ -1045,6 +1171,12 @@ export function parseProject(value: unknown): MixProject {
     }
   if (referenced.size !== segments.length)
     throw new Error("Some audio segments are not assigned to a sentence.");
+  for (const track of tracks)
+    if (
+      track.sentenceGroupId !== undefined &&
+      !segments.some((segment) => segment.trackId === track.id)
+    )
+      throw new Error("A sentence audio choice has no source segments.");
   ensureNoOverlap(segments);
   if (input.audioSchema !== undefined && input.audioSchema !== 2) {
     if (

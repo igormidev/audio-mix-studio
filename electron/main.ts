@@ -419,7 +419,13 @@ async function openProject(origin?: unknown) {
         onProgress: report,
       });
       idMap.set(track.id, cached.id);
-      imported.push({ ...cached, transcript: track.transcript });
+      imported.push({
+        ...cached,
+        transcript: track.transcript,
+        ...(track.sentenceGroupId
+          ? { sentenceGroupId: track.sentenceGroupId }
+          : {}),
+      });
     }
     project.tracks = imported;
     project.segments = project.segments.map((segment) => ({
@@ -671,20 +677,24 @@ function registerIPC() {
   handle("studio:analyze", (value: unknown) => {
     const project = checkedProject(value);
     return withOperation(async (signal, report) => {
-      if (!project.tracks.length)
-        throw new Error("Add audio before analyzing.");
+      // A sentence replacement is already attached to one explicit choice.
+      // Treating it as another complete script would let AI create unrelated
+      // rows or consume its timing when regrouping the original full takes.
+      const takes = project.tracks.filter((track) => !track.sentenceGroupId);
+      if (!takes.length)
+        throw new Error("Add a complete audio take before grouping sentences.");
       const dependencies = await checkDependencies(cacheDirectory, signal);
       if (!dependencies.codex.available)
         throw new Error(
           "Codex is required to organize sentences. Install Codex, sign in, and try again.",
         );
-      for (const [index, track] of project.tracks.entries()) {
+      for (const [index, track] of takes.entries()) {
         if (!track.transcript || track.transcript.model !== project.model) {
           report({
             phase: "transcribing",
-            message: `Transcribing take ${index + 1} of ${project.tracks.length}…`,
+            message: `Transcribing take ${index + 1} of ${takes.length}…`,
             trackId: track.id,
-            fraction: index / project.tracks.length,
+            fraction: index / takes.length,
           });
           track.transcript = await transcribe(
             track,
@@ -697,7 +707,7 @@ function registerIPC() {
         }
       }
       const alignment = await alignTranscripts(
-        project.tracks,
+        takes,
         cacheDirectory,
         report,
         signal,

@@ -15,6 +15,7 @@ Built for faceless YouTube channels, voiceovers, and anyone who has ever thought
 - **Work in project tabs.** Open several mixes, double-click a tab to rename it, and close/reopen tabs without losing their edits. All valid open tabs and the active tab recover after restart.
 - **Choose light or dark mode.** Use the top-right appearance button, or choose Light/Dark/System in settings. Larger text and stronger contrast keep both modes readable.
 - **Compare sentences, not entire files.** Preview variations side by side and click anywhere on a card to select it. The play button previews without changing your choice.
+- **Replace just one sentence.** Click **Add audio** on its row, or drop a short recording onto that sentence. The file becomes another choice for that sentence only; preview and select it when ready. Your existing choice and the rest of the mix stay intact.
 - **Keep the original pacing.** Automatic cuts meet halfway through the silence between sentences. Selecting a complete take in its original order at 1x, with no added pauses or fades, preserves its complete source audio.
 - **Control speed and joints.** Change each sentence from 0.5x to 2.5x in 0.25 steps without changing pitch. Hover a divider to set the preceding fade-out, extra pause, and following fade-in. All defaults start at zero.
 - **Match meaning across scripts.** Codex groups the same idea even when the wording changes. Extra sentences become their own groups, with only the takes that contain them.
@@ -84,7 +85,7 @@ Explicit Save still produces a portable project and audio folder. The workspace 
 
 ## Your first mix
 
-1. **Import your takes.** Select one or more audio files or drop them into the window. WAV, MP3, M4A, AAC, FLAC, OGG, Opus, AIFF, and other common audio formats are supported. Imports are local copies; originals stay untouched.
+1. **Import your takes.** Select one or more audio files or drop them into an empty mix. Once the mix has audio, drop full takes onto the sidebar, master timeline, or Manual edit waveforms. WAV, MP3, M4A, AAC, FLAC, OGG, Opus, AIFF, and other common audio formats are supported. Imports are local copies; originals stay untouched.
 2. **Let the app organize them.** Once transcription is prepared, the first import transcribes and groups automatically. A new Mac is guided to setup first. For additional takes, click **Group sentences**. You can see progress and cancel. Regrouping replaces cuts, with a warning first and Undo afterward.
 3. **Choose each sentence.** Preview the variations, then click the card you prefer. A sentence that appears in only one recording has one option. The first available take is selected initially; AI does not pretend to judge sound quality from text.
 4. **Polish if needed.** In **Manual edit**, click a segment to toggle it. Use **Cut** and click inside a segment to split. Click or right-click a segment for exact start/end controls. Zoom for more precise placement.
@@ -99,6 +100,7 @@ Open **Quick guide → Let’s make a mix** for three real, locally synthesized 
 - Sentence groups define master order. Within a group, enabled pieces play in take/import order, then source time. Enabling two full variations plays both; it does not mix them over one another. **Custom mix** identifies these selections.
 - Automatic boundaries partition each source from its first sample to its last. The gap between two speech ranges is divided at its midpoint, so half stays with each sentence; source silence is retained. Boundaries are rounded to the 48 kHz sample grid. Trims and cuts remain explicit user edits.
 - Existing unedited automatic cuts are migrated when their original transcript and boundaries can be verified. Ambiguous legacy cuts, manual trims, and splits are preserved. Regroup an older manually edited project to create a fresh complete partition; Undo remains available.
+- To replace a sentence, use its **Add audio** button or drop one or more short files onto that row in **Sentence choices**. Only the hovered sentence is highlighted. Each complete file becomes an unselected alternative there, including its original silence, without transcription or AI grouping. Undo removes the addition. Drops onto search, dividers, or blank areas in Sentence choices do not import full takes. Sentence-only files stay attached when regrouping preserves their sentence; if a target cannot be identified safely, regrouping stops and keeps your current mix.
 - Split pieces retain their sentence text as context. Choosing that take again selects all surviving pieces. A variation preview plays those pieces in order, including any trims.
 - Hover the divider between audible sentences for **fade-out · pause · fade-in** controls. Pauses add silence; fades change volume at the two edges without overlapping clips or shortening the mix. In **Studio settings → Joints**, set independent default fade-in, fade-out, and pause values. All start at 0 ms. Each joint inherits defaults for fields without an explicit override. Skipping a sentence reconnects the neighboring audible sentences.
 - Sentence speed affects both variation previews and the master/export. Full-source previews in Manual edit remain at their original speed. Fades can be up to 5 seconds and pauses up to 10 seconds; fades are limited by the actual clip duration.
@@ -160,6 +162,7 @@ npx tsx scripts/smoke-electron.ts  # production Electron IPC/media, isolated pro
 npx tsx scripts/smoke-ui.ts        # real sentence/manual editor interactions
 npx tsx scripts/smoke-tabs.ts      # tabs, background ownership, themes, restart, exact export
 npx tsx scripts/smoke-editing.ts   # compact editor, speed, joints, zoom, guide, models
+npx tsx scripts/smoke-snippets.ts  # sentence-only import/drop, history, export, recovery
 npx tsx scripts/smoke-recovery.ts  # per-tab missing media, future formats, export preference
 npx tsx scripts/smoke-installed.ts # installed /Applications bundle, minimal Finder PATH
 ```
