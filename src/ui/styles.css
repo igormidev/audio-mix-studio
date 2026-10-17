@@ -2150,3 +2150,434 @@ kbd {
   color: var(--secondary);
   font-size: 13px;
 }
+
+/* Compact editor: source identity lives in the take list; cards focus on sound. */
+.workspace-page > main {
+  padding-top: 18px;
+  padding-bottom: 16px;
+}
+.master-section {
+  flex-shrink: 0;
+}
+.sidebar .export-wrap {
+  margin-top: 10px;
+  flex-shrink: 0;
+}
+.sidebar .export-wrap > .button {
+  width: 100%;
+  justify-content: center;
+}
+.sidebar .export-menu {
+  left: 0;
+  right: auto;
+  top: auto;
+  bottom: calc(100% + 6px);
+  width: 100%;
+  z-index: 31;
+}
+.take {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  gap: 9px;
+  padding: 10px;
+  border-color: var(--take-color);
+  flex-shrink: 0;
+}
+.take-filename {
+  display: block;
+  min-width: 0;
+  padding-right: 17px;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.take-remove.icon-button {
+  position: absolute;
+  top: 7px;
+  right: 5px;
+}
+.take-detail {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.take-symbol {
+  width: 30px;
+  flex-shrink: 0;
+  color: var(--take-color);
+  background: color-mix(in srgb, var(--take-color) 10%, transparent);
+}
+.take-info {
+  gap: 5px;
+  padding: 0;
+}
+.take-name {
+  font-size: 12px !important;
+  color: var(--text) !important;
+  font-family: inherit !important;
+}
+.take-metadata {
+  display: flex;
+  align-items: center;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.take-metadata strong {
+  font-size: inherit;
+  font-weight: 600;
+  color: var(--secondary);
+}
+.sidebar-button.guide-button,
+.guide-setting .text-button {
+  font-weight: 400;
+}
+.sidebar-bottom {
+  padding-top: 16px;
+}
+.master-timeline {
+  padding: 0 0 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+.master-timeline-canvas {
+  min-width: 100%;
+}
+.master-timeline .ruler {
+  padding-left: 2px;
+  padding-right: 2px;
+}
+.master-clips {
+  display: block;
+  height: 98px;
+  gap: 0;
+  border-radius: 0;
+}
+.master-clip {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  justify-content: flex-start;
+  padding: 0;
+  outline-offset: -2px;
+  cursor: crosshair;
+}
+.master-clip + .master-clip {
+  border-left: 0.5px solid var(--line-strong);
+}
+.master-clip::before {
+  display: none;
+}
+.master-clip-number {
+  display: block;
+  flex-shrink: 0;
+  padding: 4px 2px 2px;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--secondary);
+  font-family: "Geist Mono", monospace;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.master-clip-text {
+  display: block;
+  flex-shrink: 0;
+  padding: 0 2px;
+  height: 20px;
+  font-size: 10px;
+  line-height: 18px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.master-clip .waveform {
+  padding: 0;
+  width: 100%;
+  min-width: 0;
+  height: 54px;
+  flex: 1;
+}
+.clip-tooltip {
+  position: fixed;
+  z-index: 150;
+  transform: translate(-50%, -100%);
+  pointer-events: none;
+  width: max-content;
+  max-width: 310px;
+  padding: 10px 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 5px 24px #0002;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.clip-tooltip strong {
+  font-size: 12px;
+  line-height: 1.5;
+  font-weight: 600;
+}
+.clip-tooltip span {
+  font-size: 10px;
+  color: var(--secondary);
+}
+.sentence-row {
+  border-bottom: 0;
+  padding: 10px 0;
+  gap: 12px;
+  contain-intrinsic-size: auto 112px;
+}
+.sentence-heading {
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 7px;
+}
+.sentence-heading h3 {
+  max-width: none;
+  flex: 1;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.sentence-number {
+  padding-top: 3px;
+}
+.sentence-tags {
+  gap: 5px;
+}
+.sentence-speed {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  color: var(--secondary);
+}
+.sentence-speed .icon-button {
+  width: 22px;
+  height: 25px;
+}
+.sentence-speed span {
+  min-width: 37px;
+  font-size: 11px;
+  font-family: "Geist Mono", monospace;
+  text-align: center;
+}
+.variations {
+  gap: 8px;
+}
+.variation {
+  position: relative;
+  padding: 10px 11px;
+  min-height: 60px;
+  justify-content: center;
+}
+.variation:hover {
+  border-color: var(--take-color);
+}
+.variation.chosen {
+  border-color: var(--take-color);
+  box-shadow: inset 0 0 0 1px var(--take-color);
+  background: color-mix(in srgb, var(--take-color) 12%, var(--surface));
+}
+.variation.partial {
+  border: 1px dashed var(--take-color);
+}
+.variation:has(.variation-select:focus-visible) {
+  outline: 2px solid var(--take-color);
+  outline-offset: 2px;
+}
+.variation-select {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border: 0;
+  background: transparent;
+  border-radius: inherit;
+}
+.variation-wave {
+  pointer-events: none;
+  margin: 0;
+  height: 38px;
+  gap: 9px;
+}
+.variation-wave .waveform {
+  min-width: 0;
+  flex: 1;
+}
+.variation-wave .preview-button {
+  position: relative;
+  z-index: 2;
+  pointer-events: auto;
+}
+.variation-time {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 750;
+  color: var(--take-color);
+  flex-shrink: 0;
+}
+.joint-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0;
+  position: relative;
+  min-height: 27px;
+}
+.joint-line {
+  height: 0.5px;
+  flex: 1;
+  background: var(--line);
+}
+.joint-controls {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.joint-dot {
+  color: var(--muted);
+  font-size: 11px;
+}
+.joint-control {
+  position: relative;
+}
+.joint-value {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  font-size: 10px;
+  line-height: 18px;
+  color: var(--secondary);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  white-space: nowrap;
+  font-weight: 400;
+}
+.joint-value:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.joint-popover {
+  visibility: hidden;
+  opacity: 0;
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 220px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 4px 20px #0002;
+  z-index: 20;
+}
+.joint-control:hover .joint-popover,
+.joint-control:focus-within .joint-popover {
+  visibility: visible;
+  opacity: 1;
+}
+.joint-control[data-placement="below"] .joint-popover {
+  bottom: auto;
+  top: 100%;
+}
+[data-theme="light"] .variation-wave,
+[data-theme="light"] .variation-time {
+  color: color-mix(in srgb, var(--take-color) 70%, #000);
+}
+.joint-popover label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--text);
+  font-size: 12px;
+}
+.joint-popover output {
+  margin-left: auto;
+  font-family: "Geist Mono", monospace;
+  color: var(--secondary);
+  font-size: 10px;
+}
+.joint-popover input {
+  flex-basis: 100%;
+  width: 100%;
+}
+.codex-controls {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.codex-model-field {
+  flex: 1;
+  min-width: 180px;
+}
+.codex-reasoning-field {
+  flex: 1;
+  min-width: 130px;
+}
+.codex-controls .field-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.codex-controls select {
+  width: 100%;
+}
+.codex-fast {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--secondary);
+}
+.codex-fast[aria-pressed="true"] {
+  border-color: var(--green-line);
+  background: var(--green-soft);
+  color: var(--green-text);
+}
+.codex-error {
+  color: var(--warning-text);
+  font-size: 12px;
+}
+.guide-setting {
+  padding: 12px 0;
+}
+@media (max-width: 1160px) {
+  .workspace-page > main {
+    padding-top: 14px;
+  }
+  .sentence-heading h3 {
+    font-size: 13px;
+  }
+  .sentence-tags .unique-badge,
+  .sentence-tags .custom-badge {
+    display: none;
+  }
+  .variation {
+    padding: 8px;
+  }
+  .variation-time {
+    font-size: 12px;
+  }
+}
+.sentence-separator {
+  height: 0.5px;
+  background: var(--line);
+  margin: 12px 0;
+}

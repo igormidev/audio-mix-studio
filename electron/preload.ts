@@ -9,6 +9,8 @@ import type {
 } from "../src/shared/types";
 
 const api: StudioAPI = {
+  preferences: () => ipcRenderer.invoke("studio:preferences"),
+  codexModels: () => ipcRenderer.invoke("studio:codexModels"),
   restoreWorkspace: () => ipcRenderer.invoke("studio:restoreWorkspace"),
   autosaveWorkspace: (session: WorkspaceSession) =>
     ipcRenderer.invoke("studio:autosaveWorkspace", session),
@@ -20,8 +22,8 @@ const api: StudioAPI = {
   importPaths: (paths: string[], projectId?: string) =>
     ipcRenderer.invoke("studio:importPaths", paths, projectId),
   pathForFile: (file: File) => webUtils.getPathForFile(file),
-  audioSlice: (trackId: string, start: number, end: number) =>
-    ipcRenderer.invoke("studio:audioSlice", trackId, start, end),
+  audioSlice: (trackId: string, start: number, end: number, speed?: number) =>
+    ipcRenderer.invoke("studio:audioSlice", trackId, start, end, speed),
   analyze: (project: MixProject) =>
     ipcRenderer.invoke("studio:analyze", project),
   setupTranscription: (model: TranscriptionModel, projectId?: string) =>
@@ -70,6 +72,9 @@ ipcRenderer.on("studio:shortcut", (_event, command: string) => {
       "reopen-tab",
       "next-tab",
       "previous-tab",
+      "timeline-zoom-reset",
+      "timeline-zoom-in",
+      "timeline-zoom-out",
     ].includes(command)
   )
     window.dispatchEvent(

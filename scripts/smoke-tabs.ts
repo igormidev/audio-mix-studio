@@ -59,7 +59,16 @@ async function rename(page: Page, name: string) {
   await savedProject(page, name);
 }
 async function loadDemo(page: Page, name: string) {
-  await current(page).locator(".demo-button").click();
+  await current(page)
+    .getByRole("button", { name: "Studio settings", exact: true })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Quick guide", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Let’s make a mix", exact: true })
+    .click();
   await expect(current(page).locator(".sentence-row")).toHaveCount(4, {
     timeout: 90_000,
   });
@@ -360,9 +369,11 @@ try {
     .getByRole("button", { name: "Close Delivery B", exact: true })
     .click();
   await expect(page.locator(".studio-tab-label")).toHaveCount(2);
-  await page
-    .getByRole("button", { name: "Reopen closed tab", exact: true })
-    .click();
+  await page.evaluate(() =>
+    window.dispatchEvent(
+      new CustomEvent("studio-shortcut", { detail: "reopen-tab" }),
+    ),
+  );
   await expect(projectTab(page, "Delivery B")).toHaveAttribute(
     "aria-selected",
     "true",
@@ -548,9 +559,11 @@ try {
   await projectTab(page, "Delivery A").click();
   const after = await exportWav(app, page, path.join(temporary, "after.wav"));
   expect(after).toEqual(before);
-  await page
-    .getByRole("button", { name: "Reopen closed tab", exact: true })
-    .click();
+  await page.evaluate(() =>
+    window.dispatchEvent(
+      new CustomEvent("studio-shortcut", { detail: "reopen-tab" }),
+    ),
+  );
   await expect(projectTab(page, "Scratch")).toHaveAttribute(
     "aria-selected",
     "true",

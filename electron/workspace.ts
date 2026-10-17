@@ -2,13 +2,26 @@ import { chmod, copyFile, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { parseProject } from "../src/domain/project";
+import {
+  newProject,
+  parseProject,
+  UnsupportedAudioSchemaError,
+} from "../src/domain/project";
 import type {
   MixProject,
   StudioTheme,
   WorkspaceSession,
+  StudioPreferences,
 } from "../src/shared/types";
 import { atomicJSON } from "./media";
+
+/** Only missing cached media may silently remove a structurally valid tab. */
+export class UnavailableProjectMediaError extends Error {
+  constructor() {
+    super("This mix's cached audio is no longer available.");
+    this.name = "UnavailableProjectMediaError";
+  }
+}
 
 export function checkedTheme(value: unknown): StudioTheme {
   if (value !== "light" && value !== "dark" && value !== "system")
@@ -57,10 +70,10 @@ export class ProjectTaskQueue {
   }
 }
 
-export function parseWorkspace(
-  value: unknown,
-  checkProject: (value: unknown) => MixProject = parseProject,
-): WorkspaceSession {
+function workspaceInput(value: unknown): Record<string, unknown> & {
+  projects: unknown[];
+  closedProjects?: unknown[];
+} {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("The saved workspace is invalid.");
   const input = value as Record<string, unknown>;
@@ -71,12 +84,30 @@ export function parseWorkspace(
     input.projects.length > 50
   )
     throw new Error("A workspace must contain between 1 and 50 mixes.");
-  const projects = input.projects.map(checkProject);
   if (
     input.closedProjects !== undefined &&
     (!Array.isArray(input.closedProjects) || input.closedProjects.length > 20)
   )
     throw new Error("A workspace can keep up to 20 recently closed mixes.");
+  if (
+    typeof input.activeProjectId !== "string" ||
+    !input.activeProjectId.length ||
+    input.activeProjectId.length > 200
+  )
+    throw new Error("The active mix tab is missing from the workspace.");
+  checkedTheme(input.theme);
+  return input as Record<string, unknown> & {
+    projects: unknown[];
+    closedProjects?: unknown[];
+  };
+}
+
+export function parseWorkspace(
+  value: unknown,
+  checkProject: (value: unknown) => MixProject = parseProject,
+): WorkspaceSession {
+  const input = workspaceInput(value);
+  const projects = input.projects.map(checkProject);
   const closedProjects =
     (input.closedProjects as unknown[] | undefined)?.map(checkProject) || [];
   const ids = new Set(projects.map((project) => project.id));
@@ -115,6 +146,9 @@ export class WorkspaceStore {
     private readonly checkProject: (value: unknown) => MixProject,
     private readonly write: typeof atomicJSON = atomicJSON,
     private readonly maxBytes = 100 * 1024 * 1024,
+    private readonly restoreProject: (
+      value: unknown,
+    ) => Promise<MixProject> = async (value) => checkProject(value),
   ) {
     this.filename = path.join(root, "workspace-session.json");
   }
@@ -139,9 +173,22 @@ export class WorkspaceStore {
       // Upgrade only when the workspace file does not exist. Keep the legacy
       // session untouched as a recovery copy, including when validation fails.
       try {
-        const project = this.checkProject(
-          await this.read(path.join(this.root, "last-session.json")),
+        const legacy = await this.read(
+          path.join(this.root, "last-session.json"),
         );
+        let project: MixProject;
+        try {
+          parseProject(legacy);
+          project = await this.restoreProject(legacy);
+        } catch (error) {
+          if (
+            !(error instanceof UnavailableProjectMediaError) &&
+            !(error instanceof UnsupportedAudioSchemaError)
+          )
+            throw error;
+          this.loaded = true;
+          return null;
+        }
         const migrated: WorkspaceSession = {
           version: 1,
           projects: [project],
@@ -157,8 +204,69 @@ export class WorkspaceStore {
         return null;
       }
     }
+    if (
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Number.isInteger((value as Record<string, unknown>).version) &&
+      Number((value as Record<string, unknown>).version) > 0 &&
+      (value as Record<string, unknown>).version !== 1
+    ) {
+      // A newer schema belongs to a newer app. Start a fresh workspace and
+      // retain its exact original bytes before any new autosave replaces it.
+      this.needsRecoveryBackup = true;
+      this.loaded = true;
+      return null;
+    }
     try {
-      this.session = parseWorkspace(value, this.checkProject);
+      const input = workspaceInput(value);
+      const openIds = new Set<string>();
+      const closedIds = new Set<string>();
+      let incompatibleOpen = false;
+      const restoreTabs = async (projects: unknown[], closed = false) => {
+        const restored: MixProject[] = [];
+        for (const value of projects) {
+          try {
+            const project = parseProject(value);
+            const ids = closed ? closedIds : openIds;
+            if (ids.has(project.id) || (closed && openIds.has(project.id)))
+              throw new Error(
+                "The saved workspace contains duplicate mix tabs.",
+              );
+            ids.add(project.id);
+            restored.push(await this.restoreProject(project));
+          } catch (error) {
+            if (
+              !(error instanceof UnavailableProjectMediaError) &&
+              !(error instanceof UnsupportedAudioSchemaError)
+            )
+              throw error;
+            if (error instanceof UnsupportedAudioSchemaError && !closed)
+              incompatibleOpen = true;
+            this.needsRecoveryBackup = true;
+          }
+        }
+        return restored;
+      };
+      const projects = await restoreTabs(input.projects);
+      const closedProjects = await restoreTabs(
+        input.closedProjects || [],
+        true,
+      );
+      if (!openIds.has(input.activeProjectId as string) && !incompatibleOpen)
+        throw new Error("The active mix tab is missing from the workspace.");
+      if (!projects.length) projects.push(newProject());
+      this.session = parseWorkspace({
+        version: 1,
+        theme: input.theme,
+        projects,
+        closedProjects,
+        activeProjectId: projects.some(
+          (project) => project.id === input.activeProjectId,
+        )
+          ? input.activeProjectId
+          : projects[0].id,
+      });
     } catch (error) {
       this.needsRecoveryBackup = true;
       throw error;
@@ -224,5 +332,82 @@ export class WorkspaceStore {
 
   project(id: string): MixProject | null {
     return this.session?.projects.find((project) => project.id === id) || null;
+  }
+}
+
+/** User-level onboarding state survives closing tabs and resetting a workspace. */
+export class PreferencesStore {
+  readonly filename: string;
+  private contents: Record<string, unknown> = { version: 1 };
+  private value: StudioPreferences = { hasExportedMaster: false };
+  private initialization: Promise<void> | null = null;
+  private queue: Promise<void> = Promise.resolve();
+  private needsRecoveryBackup = false;
+
+  constructor(
+    private readonly root: string,
+    private readonly write: typeof atomicJSON = atomicJSON,
+  ) {
+    this.filename = path.join(root, "preferences.json");
+  }
+
+  private initialize(): Promise<void> {
+    if (!this.initialization) {
+      this.initialization = (async () => {
+        try {
+          if ((await stat(this.filename)).size > 1024 * 1024)
+            throw new Error("The preferences file is too large.");
+          const input: unknown = JSON.parse(
+            await readFile(this.filename, "utf8"),
+          );
+          if (!input || typeof input !== "object" || Array.isArray(input))
+            throw new Error("The preferences file is invalid.");
+          this.contents = input as Record<string, unknown>;
+          this.value = {
+            hasExportedMaster: this.contents.hasExportedMaster === true,
+          };
+        } catch (error) {
+          this.needsRecoveryBackup =
+            (error as NodeJS.ErrnoException).code !== "ENOENT";
+        }
+      })();
+    }
+    return this.initialization;
+  }
+
+  async get(): Promise<StudioPreferences> {
+    await this.initialize();
+    await this.queue.catch(() => undefined);
+    return { ...this.value };
+  }
+
+  async recordSuccessfulExport(): Promise<void> {
+    await this.initialize();
+    this.queue = this.queue
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.needsRecoveryBackup) {
+          const recovery = path.join(
+            this.root,
+            `preferences.recovery-${randomUUID()}.json`,
+          );
+          await copyFile(this.filename, recovery, constants.COPYFILE_EXCL);
+          await chmod(recovery, 0o600);
+          this.needsRecoveryBackup = false;
+        }
+        const contents = {
+          ...this.contents,
+          version: 1,
+          hasExportedMaster: true,
+        };
+        await this.write(this.filename, contents);
+        this.contents = contents;
+        this.value = { hasExportedMaster: true };
+      });
+    await this.queue;
+  }
+
+  flush(): Promise<void> {
+    return this.queue;
   }
 }

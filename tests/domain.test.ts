@@ -5,7 +5,6 @@ import type {
   MixProject,
 } from "../src/shared/types";
 import {
-  ALIGNMENT_PADDING_SECONDS,
   alignmentSchema,
   appendTracks,
   applyAlignment,
@@ -19,6 +18,11 @@ import {
   splitSegment,
   toggleSegment,
   trimSegment,
+  setGroupSpeed,
+  setJointDefaults,
+  setJointOverride,
+  effectiveJointSettings,
+  validCodexSelection,
 } from "../src/domain/project";
 
 function track(id: string, duration = 10): AudioTrack {
@@ -177,7 +181,7 @@ describe("master editing", () => {
 });
 
 describe("alignment contract", () => {
-  it("pads speech boundaries by 60 ms and clamps short gaps at their midpoint", () => {
+  it("preserves the complete source and partitions natural silence at midpoints", () => {
     const p = appendTracks(newProject(), [track("a")]);
     const output = applyAlignment(p, {
       groups: [
@@ -198,12 +202,14 @@ describe("alignment contract", () => {
         },
       ],
     });
-    expect(output.segments[0].start).toBeCloseTo(1 - ALIGNMENT_PADDING_SECONDS);
+    expect(output.segments[0].start).toBe(0);
     expect(output.segments[0].end).toBeCloseTo(2.02);
     expect(output.segments[1].start).toBeCloseTo(2.02);
-    expect(output.segments[1].end).toBeCloseTo(3.06);
+    expect(output.segments[1].end).toBe(4);
+    expect(output.segments[2].start).toBe(4);
     expect(output.segments[2].end).toBe(10);
     expect(parseProject(output)).toEqual(output);
+    expect(masterDuration(output)).toBe(10);
   });
 
   it("preserves selected takes and muted groups when a sentence label matches again", () => {
@@ -330,6 +336,97 @@ describe("alignment contract", () => {
 });
 
 describe("saved project validation", () => {
+  function legacyProject(): MixProject {
+    const input = appendTracks(newProject(), [
+      {
+        ...track("a"),
+        transcript: {
+          model: "large-v3-turbo",
+          language: "en",
+          words: [],
+          segments: [
+            { start: 1, end: 2, text: "First sentence." },
+            { start: 4, end: 5, text: "Last sentence." },
+          ],
+        },
+      },
+    ]);
+    const grouped = applyAlignment(input, {
+      groups: [
+        {
+          text: "First sentence.",
+          note: "",
+          variations: [
+            { trackId: "a", start: 1, end: 2, text: "First sentence." },
+          ],
+        },
+        {
+          text: "Last sentence.",
+          note: "",
+          variations: [
+            { trackId: "a", start: 4, end: 5, text: "Last sentence." },
+          ],
+        },
+      ],
+    });
+    return {
+      ...grouped,
+      audioSchema: undefined,
+      joinFadeMs: 8,
+      segments: grouped.segments.map((segment, index) => ({
+        ...segment,
+        start: index ? 3.94 : 0.94,
+        end: index ? 5.06 : 2.06,
+      })),
+    };
+  }
+  it("repairs only verified legacy automatic boundaries and retires automatic edge fades", () => {
+    const legacy = legacyProject();
+    const migrated = parseProject(legacy);
+    expect(
+      migrated.segments.map((segment) => [segment.start, segment.end]),
+    ).toEqual([
+      [0, 3],
+      [3, 10],
+    ]);
+    expect(migrated.segments.map((segment) => segment.id)).toEqual(
+      legacy.segments.map((segment) => segment.id),
+    );
+    expect(migrated.segments.map((segment) => segment.enabled)).toEqual(
+      legacy.segments.map((segment) => segment.enabled),
+    );
+    expect(migrated.audioSchema).toBe(2);
+    expect(migrated.joinFadeMs).toBe(0);
+    expect(migrated.jointDefaults).toEqual({
+      pauseMs: 0,
+      fadeInMs: 0,
+      fadeOutMs: 0,
+    });
+    expect(masterDuration(migrated)).toBe(10);
+  });
+  it("preserves manual legacy trims, split pieces, and ambiguous ranges", () => {
+    const legacy = legacyProject();
+    const trimmed = {
+      ...legacy,
+      segments: legacy.segments.map((segment, index) =>
+        index ? segment : { ...segment, start: 0.95 },
+      ),
+    };
+    expect(parseProject(trimmed).segments).toEqual(trimmed.segments);
+    const split = splitSegment(legacy, legacy.segments[0].id, 1.5);
+    expect(parseProject(split).segments).toEqual(split.segments);
+    const noTranscript = {
+      ...legacy,
+      tracks: legacy.tracks.map((track) => ({
+        ...track,
+        transcript: undefined,
+      })),
+    };
+    expect(parseProject(noTranscript).segments).toEqual(noTranscript.segments);
+    // Once migrated, a later manual edit cannot be mistaken for the old policy.
+    const marked = { ...legacy, audioSchema: 2 as const };
+    expect(parseProject(marked).segments).toEqual(marked.segments);
+  });
   it("round-trips real edits and drops unrecognized persisted fields", () => {
     const mixed = applyAlignment(project(), alignment);
     const parsed = parseProject({ ...mixed, untrusted: "__proto__" });
@@ -405,5 +502,119 @@ describe("saved project validation", () => {
         ),
       }),
     ).toThrow(/overlap/);
+  });
+});
+
+describe("sentence speed and joints", () => {
+  function twoSentences(): MixProject {
+    return applyAlignment(appendTracks(newProject(), [track("a")]), {
+      groups: [
+        {
+          text: "First.",
+          note: "",
+          variations: [{ trackId: "a", start: 1, end: 2, text: "First." }],
+        },
+        {
+          text: "Second.",
+          note: "",
+          variations: [{ trackId: "a", start: 4, end: 5, text: "Second." }],
+        },
+      ],
+    });
+  }
+  it("keeps source timing separate from output timing and adds each joint pause once", () => {
+    let p = twoSentences();
+    expect(masterDuration(p)).toBe(10);
+    const [left, right] = p.groups;
+    p = setGroupSpeed(p, left.id, 2);
+    p = setGroupSpeed(p, right.id, 0.5);
+    p = setJointDefaults(p, { pauseMs: 500, fadeOutMs: 1000, fadeInMs: 2000 });
+    const clips = masterClips(p);
+    expect(
+      clips.map((clip) => [
+        clip.start,
+        clip.end,
+        clip.sourceDuration,
+        clip.duration,
+        clip.offset,
+      ]),
+    ).toEqual([
+      [0, 3, 3, 1.5, 0],
+      [3, 10, 7, 14, 2],
+    ]);
+    expect(clips[0].fadeOutMs).toBe(1000);
+    expect(clips[1].fadeInMs).toBe(2000);
+    expect(clips[1].pauseBeforeMs).toBe(500);
+    expect(masterDuration(p)).toBe(16);
+    expect(parseProject(p)).toEqual(p);
+    expect(() => setGroupSpeed(p, left.id, 0.7)).toThrow(/0.25/);
+  });
+  it("uses overrides per field, falls back to defaults, and never pauses before the first audible group", () => {
+    let p = twoSentences();
+    const [left, right] = p.groups;
+    p = setJointDefaults(p, { pauseMs: 500, fadeInMs: 200 });
+    p = setJointOverride(p, left.id, right.id, { pauseMs: 250, fadeInMs: 0 });
+    p = setJointDefaults(p, { pauseMs: 1000, fadeOutMs: 300 });
+    expect(effectiveJointSettings(p, left.id, right.id)).toEqual({
+      pauseMs: 250,
+      fadeInMs: 0,
+      fadeOutMs: 300,
+    });
+    expect(masterDuration(p)).toBe(10.25);
+    p = setJointOverride(p, left.id, right.id, { pauseMs: undefined });
+    expect(effectiveJointSettings(p, left.id, right.id).pauseMs).toBe(1000);
+    p = setJointOverride(p, left.id, right.id, null);
+    expect(effectiveJointSettings(p, left.id, right.id).fadeInMs).toBe(200);
+    p = toggleSegment(p, p.groups[0].segmentIds[0]);
+    expect(masterClips(p)[0].offset).toBe(0);
+    expect(masterClips(p)[0].pauseBeforeMs).toBe(0);
+    expect(masterDuration(p)).toBe(7);
+  });
+  it("validates persisted speeds, joint settings, and source sentence references", () => {
+    const p = twoSentences();
+    expect(() =>
+      parseProject({
+        ...p,
+        groups: p.groups.map((group) => ({ ...group, speed: 2.6 })),
+      }),
+    ).toThrow(/speed/);
+    expect(() =>
+      parseProject({
+        ...p,
+        jointDefaults: { pauseMs: -1, fadeOutMs: 0, fadeInMs: 0 },
+      }),
+    ).toThrow(/range/);
+    expect(() => setJointDefaults(p, { pauseMs: 10001 })).toThrow(/range/);
+    expect(() =>
+      parseProject({
+        ...p,
+        jointOverrides: { '["missing","also-missing"]': { pauseMs: 100 } },
+      }),
+    ).toThrow(/pair/);
+  });
+  it("uses the live Codex catalog to normalize unsupported saved preferences", () => {
+    const models = [
+      {
+        id: "current",
+        name: "Current",
+        description: "",
+        reasoning: ["low", "high"],
+        defaultReasoning: "low",
+        isDefault: true,
+        fast: false,
+      },
+    ];
+    expect(
+      validCodexSelection(
+        { model: "old", reasoning: "medium", fast: true },
+        models,
+      ),
+    ).toEqual({ model: "current", reasoning: "low", fast: false });
+    expect(
+      validCodexSelection(
+        { model: "current", reasoning: "high", fast: false },
+        models,
+      ).reasoning,
+    ).toBe("high");
   });
 });

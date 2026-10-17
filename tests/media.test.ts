@@ -11,6 +11,15 @@ import {
   decodeAudioSlice,
 } from "../electron/media";
 import type { MasterClip } from "../src/shared/types";
+import {
+  appendTracks,
+  applyAlignment,
+  masterClips,
+  masterDuration,
+  newProject,
+  setGroupSpeed,
+  setJointDefaults,
+} from "../src/domain/project";
 
 describe("bounded media byte ranges", () => {
   it("supports full, prefix, suffix and open-ended playback requests", () => {
@@ -209,6 +218,173 @@ describe("real FFmpeg media pipeline", () => {
     expect(() => store.track("00000000-0000-0000-0000-000000000000")).toThrow(
       "missing",
     );
+  });
+  it("preserves every sample including leading, internal and trailing silence when choosing one complete take", async () => {
+    const silentSource = path.join(directory, "natural-pauses.wav");
+    await runProcess(ffmpeg, [
+      "-v",
+      "error",
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=440:duration=0.5",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=880:duration=0.5",
+      "-filter_complex",
+      "[0:a]adelay=250,apad=whole_dur=1[a];[1:a]adelay=250,apad=whole_dur=1[b];[a][b]concat=n=2:v=0:a=1[out]",
+      "-map",
+      "[out]",
+      silentSource,
+    ]);
+    const track = await store.importAudio(silentSource);
+    const p = applyAlignment(appendTracks(newProject(), [track]), {
+      groups: [
+        {
+          text: "First sentence",
+          note: "",
+          variations: [
+            {
+              trackId: track.id,
+              start: 0.25,
+              end: 0.75,
+              text: "First sentence",
+            },
+          ],
+        },
+        {
+          text: "Second sentence",
+          note: "",
+          variations: [
+            {
+              trackId: track.id,
+              start: 1.25,
+              end: 1.75,
+              text: "Second sentence",
+            },
+          ],
+        },
+      ],
+    });
+    expect(masterClips(p).map((clip) => [clip.start, clip.end])).toEqual([
+      [0, 1],
+      [1, 2],
+    ]);
+    expect(masterDuration(p)).toBe(track.duration);
+    const output = path.join(directory, "source-preserved.wav");
+    await renderMaster(store, masterClips(p), output, "wav", 0);
+    const raw = (filename: string) =>
+      runProcess(ffmpeg, [
+        "-v",
+        "error",
+        "-i",
+        filename,
+        "-c:a",
+        "pcm_s24le",
+        "-f",
+        "s24le",
+        "-",
+      ]);
+    const [before, after] = await Promise.all([
+      raw(store.filename(track.id)),
+      raw(output),
+    ]);
+    expect(after.stdout).toEqual(before.stdout);
+    expect(after.stdout.byteLength).toBe(2 * 48000 * 2 * 3);
+  });
+  it("renders pitch-preserving sentence speed and exact joint pauses consistently with preview PCM", async () => {
+    const track = await store.importAudio(source);
+    let p = applyAlignment(appendTracks(newProject(), [track]), {
+      groups: [
+        {
+          text: "First tone",
+          note: "",
+          variations: [
+            { trackId: track.id, start: 0, end: 1, text: "First tone" },
+          ],
+        },
+        {
+          text: "Second tone",
+          note: "",
+          variations: [
+            { trackId: track.id, start: 1, end: 2, text: "Second tone" },
+          ],
+        },
+      ],
+    });
+    p = setGroupSpeed(p, p.groups[0].id, 2.5);
+    p = setGroupSpeed(p, p.groups[1].id, 0.5);
+    p = setJointDefaults(p, { pauseMs: 250 });
+    const clips = masterClips(p);
+    const output = path.join(directory, "speed-pause.wav");
+    await renderMaster(store, clips, output, "wav", 0);
+    const decoded = await runProcess(ffmpeg, [
+      "-v",
+      "error",
+      "-i",
+      output,
+      "-f",
+      "f32le",
+      "-",
+    ]);
+    const samples = new Float32Array(
+      decoded.stdout.buffer,
+      decoded.stdout.byteOffset,
+      decoded.stdout.byteLength / 4,
+    );
+    expect(samples.length / 2).toBe(Math.round(masterDuration(p) * 48000));
+    expect(masterDuration(p)).toBe(2.65);
+    const [first, last] = await Promise.all([
+      decodeAudioSlice(store, track.id, 0, 1, undefined, 2.5),
+      decodeAudioSlice(store, track.id, 1, 2, undefined, 0.5),
+    ]);
+    const expected = new Float32Array(samples.length);
+    expected.set(new Float32Array(first));
+    expected.set(
+      new Float32Array(last),
+      Math.round(clips[1].offset * 48000) * 2,
+    );
+    let error = 0;
+    for (let index = 0; index < samples.length; index++)
+      error = Math.max(error, Math.abs(samples[index] - expected[index]));
+    expect(error).toBeLessThan(0.000001);
+    expect(
+      samples.slice(19200 * 2, 31200 * 2).every((sample) => sample === 0),
+    ).toBe(true);
+    const frequency = (start: number, end: number) => {
+      let crossings = 0;
+      for (
+        let frame = Math.round(start * 48000) + 1;
+        frame < Math.round(end * 48000);
+        frame++
+      )
+        if (samples[(frame - 1) * 2] < 0 && samples[frame * 2] >= 0)
+          crossings++;
+      return crossings / (end - start);
+    };
+    expect(frequency(0.05, 0.3)).toBeCloseTo(440, -1);
+    expect(frequency(1, 1.5)).toBeCloseTo(880, -1);
+    await expect(
+      decodeAudioSlice(store, track.id, 0, 1, undefined, 2.6),
+    ).rejects.toThrow(/speed/);
+    await expect(
+      decodeAudioSlice(store, track.id, 0, 1, undefined, 0.6),
+    ).rejects.toThrow(/speed/);
+    p = setJointDefaults(p, { fadeOutMs: 200, fadeInMs: 300 });
+    const faded = path.join(directory, "speed-pause-fades.wav");
+    await renderMaster(store, masterClips(p), faded, "wav", 0);
+    const fadedProbe = await runProcess(ffprobe, [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "csv=p=0",
+      faded,
+    ]);
+    expect(Number(fadedProbe.stdout.toString())).toBe(2.65);
   });
   it("rejects an invalid media import before touching a destination", async () => {
     const fake = path.join(directory, "not-audio.txt");

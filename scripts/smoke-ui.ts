@@ -19,7 +19,10 @@ const errors: string[] = [];
 try {
   const page = await app.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.getByRole("button", { name: /Open sample project/ }).click();
+  await page.getByRole("button", { name: "Quick guide", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Let’s make a mix", exact: true })
+    .click();
   await expect(page.locator(".sentence-row")).toHaveCount(4, {
     timeout: 90_000,
   });
@@ -231,6 +234,18 @@ try {
       2,
     ),
   );
+} catch (error) {
+  const page = await app.firstWindow();
+  console.error(
+    "UI diagnostics:",
+    await page
+      .locator(".error-banner,.workspace-save-error,.progress-banner")
+      .allTextContents(),
+  );
+  await page.screenshot({
+    path: path.join(artifacts, "native-ui-failure.png"),
+  });
+  throw error;
 } finally {
   await app.close();
   await rm(temporary, { recursive: true, force: true });

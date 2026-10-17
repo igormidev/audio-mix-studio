@@ -10,6 +10,8 @@ import {
   parseWorkspace,
   ProjectTaskQueue,
   WorkspaceStore,
+  UnavailableProjectMediaError,
+  PreferencesStore,
 } from "../electron/workspace";
 
 describe("project-owned media operation queue", () => {
@@ -247,6 +249,187 @@ describe("atomic serialized workspace recovery", () => {
     );
   });
 
+  it("drops only unavailable open and closed tabs, keeping valid order and selecting a surviving active tab", async () => {
+    const saved = session();
+    const unavailable = saved.projects[1].id;
+    const closedUnavailable = newProject(
+      "Closed mix with deleted cached audio",
+    );
+    saved.closedProjects!.push(closedUnavailable);
+    const filename = path.join(directory, "workspace-session.json");
+    const original = JSON.stringify(saved);
+    await writeFile(filename, original);
+    const store = new WorkspaceStore(directory, (value) => {
+      const project = parseProject(value);
+      if ([unavailable, closedUnavailable.id].includes(project.id))
+        throw new UnavailableProjectMediaError();
+      return project;
+    });
+    const restored = await store.restore();
+    expect(restored?.projects).toEqual([saved.projects[0]]);
+    expect(restored?.activeProjectId).toBe(saved.projects[0].id);
+    expect(restored?.closedProjects).toEqual([saved.closedProjects![0]]);
+    expect(restored?.theme).toBe("dark");
+    expect(await readFile(filename, "utf8")).toBe(original);
+    await store.save(restored);
+    const recovery = (await readdir(directory)).find((name) =>
+      name.startsWith("workspace-session.recovery-"),
+    );
+    expect(await readFile(path.join(directory, recovery!), "utf8")).toBe(
+      original,
+    );
+    expect(await new WorkspaceStore(directory, parseProject).restore()).toEqual(
+      restored,
+    );
+  });
+
+  it("keeps a valid active tab when another tab's asynchronous media check fails", async () => {
+    const saved = session();
+    await writeFile(
+      path.join(directory, "workspace-session.json"),
+      JSON.stringify(saved),
+    );
+    const store = new WorkspaceStore(
+      directory,
+      parseProject,
+      atomicJSON,
+      undefined,
+      async (value) => {
+        await Promise.resolve();
+        const project = parseProject(value);
+        if (project.id === saved.projects[0].id)
+          throw new UnavailableProjectMediaError();
+        return project;
+      },
+    );
+    const restored = await store.restore();
+    expect(restored?.projects).toEqual([saved.projects[1]]);
+    expect(restored?.activeProjectId).toBe(saved.activeProjectId);
+  });
+
+  it("starts one blank tab when every open tab is missing media while retaining valid closed tabs", async () => {
+    const saved = session();
+    await writeFile(
+      path.join(directory, "workspace-session.json"),
+      JSON.stringify(saved),
+    );
+    const ids = new Set(saved.projects.map((project) => project.id));
+    const store = new WorkspaceStore(directory, (value) => {
+      const project = parseProject(value);
+      if (ids.has(project.id)) throw new UnavailableProjectMediaError();
+      return project;
+    });
+    const restored = await store.restore();
+    expect(restored?.projects).toHaveLength(1);
+    expect(restored?.projects[0].tracks).toEqual([]);
+    expect(restored?.activeProjectId).toBe(restored?.projects[0].id);
+    expect(restored?.closedProjects).toEqual(saved.closedProjects);
+    expect(restored?.theme).toBe("dark");
+  });
+
+  it("quietly resets an unsupported numeric schema and preserves its exact bytes before replacement", async () => {
+    const original = JSON.stringify({
+      version: 2,
+      futureFormat: { keep: "everything" },
+    });
+    const store = new WorkspaceStore(directory, parseProject);
+    await writeFile(store.filename, original);
+    await expect(store.restore()).resolves.toBeNull();
+    expect(await readFile(store.filename, "utf8")).toBe(original);
+    await store.save(session());
+    const recovery = (await readdir(directory)).find((name) =>
+      name.startsWith("workspace-session.recovery-"),
+    );
+    expect(await readFile(path.join(directory, recovery!), "utf8")).toBe(
+      original,
+    );
+  });
+
+  it("silently omits only incompatible project schemas and preserves unrelated valid mixes", async () => {
+    const saved = session();
+    const original = JSON.stringify({
+      ...saved,
+      projects: [saved.projects[0], { ...saved.projects[1], audioSchema: 3 }],
+      closedProjects: [
+        saved.closedProjects![0],
+        { ...newProject("Future closed mix"), version: 2 },
+      ],
+    });
+    const store = new WorkspaceStore(directory, parseProject);
+    await writeFile(store.filename, original);
+    const restored = await store.restore();
+    expect(restored?.projects).toEqual([saved.projects[0]]);
+    expect(restored?.closedProjects).toEqual(saved.closedProjects);
+    expect(restored?.activeProjectId).toBe(saved.projects[0].id);
+    await store.save(restored);
+    const recovery = (await readdir(directory)).find((name) =>
+      name.startsWith("workspace-session.recovery-"),
+    );
+    expect(await readFile(path.join(directory, recovery!), "utf8")).toBe(
+      original,
+    );
+  });
+
+  it("quietly creates a fresh mix when every saved tab uses an unsupported project schema", async () => {
+    const saved = session();
+    const store = new WorkspaceStore(directory, parseProject);
+    await writeFile(
+      store.filename,
+      JSON.stringify({
+        ...saved,
+        projects: saved.projects.map((project) => ({
+          ...project,
+          audioSchema: 3,
+        })),
+        closedProjects: [],
+      }),
+    );
+    const restored = await store.restore();
+    expect(restored?.projects).toHaveLength(1);
+    expect(restored?.projects[0].tracks).toEqual([]);
+    expect(restored?.projects[0].audioSchema).toBe(2);
+  });
+
+  it("quietly skips incompatible legacy schemas without modifying the legacy file", async () => {
+    const legacy = path.join(directory, "last-session.json");
+    const original = JSON.stringify({ ...newProject(), audioSchema: 3 });
+    await writeFile(legacy, original);
+    await expect(
+      new WorkspaceStore(directory, parseProject).restore(),
+    ).resolves.toBeNull();
+    expect(await readFile(legacy, "utf8")).toBe(original);
+  });
+
+  it("retains malformed current-schema errors instead of disguising them as missing audio", async () => {
+    const saved = session();
+    const malformed = {
+      ...saved,
+      projects: [...saved.projects, { version: 1 }],
+    };
+    const store = new WorkspaceStore(directory, () => {
+      throw new UnavailableProjectMediaError();
+    });
+    await writeFile(store.filename, JSON.stringify(malformed));
+    await expect(store.restore()).rejects.not.toBeInstanceOf(
+      UnavailableProjectMediaError,
+    );
+    expect(JSON.parse(await readFile(store.filename, "utf8"))).toEqual(
+      malformed,
+    );
+  });
+
+  it("silently skips an unavailable legacy tab while leaving the legacy recovery file untouched", async () => {
+    const original = JSON.stringify(newProject("Legacy missing cached audio"));
+    const legacy = path.join(directory, "last-session.json");
+    await writeFile(legacy, original);
+    const store = new WorkspaceStore(directory, () => {
+      throw new UnavailableProjectMediaError();
+    });
+    await expect(store.restore()).resolves.toBeNull();
+    expect(await readFile(legacy, "utf8")).toBe(original);
+    expect(await readdir(directory)).toEqual(["last-session.json"]);
+  });
+
   it("keeps invalid legacy data untouched and never creates a replacement workspace", async () => {
     const filename = path.join(directory, "last-session.json");
     await writeFile(filename, JSON.stringify({ version: 1, tracks: [] }));
@@ -361,5 +544,78 @@ describe("atomic serialized workspace recovery", () => {
         limit,
       ).restore(),
     ).toEqual(good);
+  });
+});
+
+describe("durable master-export preference", () => {
+  let directory: string;
+  beforeEach(async () => {
+    directory = await mkdtemp(
+      path.join(os.tmpdir(), "mixstudio-preferences-test-"),
+    );
+  });
+  afterEach(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("starts false, records only a successful export, and survives workspace replacement and restart", async () => {
+    const store = new PreferencesStore(directory);
+    expect(await store.get()).toEqual({ hasExportedMaster: false });
+    expect(await readdir(directory)).toEqual([]);
+    await store.recordSuccessfulExport();
+    const workspace = new WorkspaceStore(directory, parseProject);
+    await workspace.save(session());
+    await writeFile(workspace.filename, JSON.stringify({ version: 2 }));
+    expect(
+      await new WorkspaceStore(directory, parseProject).restore(),
+    ).toBeNull();
+    expect(await new PreferencesStore(directory).get()).toEqual({
+      hasExportedMaster: true,
+    });
+  });
+
+  it("preserves unrelated preference fields and unreadable preference recovery bytes", async () => {
+    const filename = path.join(directory, "preferences.json");
+    await writeFile(
+      filename,
+      JSON.stringify({
+        version: 1,
+        hasExportedMaster: false,
+        anotherSetting: "keep",
+      }),
+    );
+    await new PreferencesStore(directory).recordSuccessfulExport();
+    expect(JSON.parse(await readFile(filename, "utf8"))).toEqual({
+      version: 1,
+      hasExportedMaster: true,
+      anotherSetting: "keep",
+    });
+    await writeFile(filename, "{invalid original preferences");
+    const recovering = new PreferencesStore(directory);
+    expect(await recovering.get()).toEqual({ hasExportedMaster: false });
+    await recovering.recordSuccessfulExport();
+    const recovery = (await readdir(directory)).find((name) =>
+      name.startsWith("preferences.recovery-"),
+    );
+    expect(await readFile(path.join(directory, recovery!), "utf8")).toBe(
+      "{invalid original preferences",
+    );
+    expect(await new PreferencesStore(directory).get()).toEqual({
+      hasExportedMaster: true,
+    });
+  });
+
+  it("does not claim a durable export marker when persistence fails", async () => {
+    const store = new PreferencesStore(directory, async () => {
+      throw new Error("Disk unavailable");
+    });
+    await expect(store.recordSuccessfulExport()).rejects.toThrow(
+      "Disk unavailable",
+    );
+    expect(await store.get()).toEqual({ hasExportedMaster: false });
+    expect(await new PreferencesStore(directory).get()).toEqual({
+      hasExportedMaster: false,
+    });
+    expect(await readdir(directory)).toEqual([]);
   });
 });

@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  memo,
+  Fragment,
+} from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -8,14 +16,13 @@ import {
   CircleHelp,
   Download,
   FileAudio2,
-  FolderOpen,
   Layers3,
   LoaderCircle,
   Pause,
   Play,
   Plus,
+  Minus,
   Redo2,
-  Save,
   Scissors,
   Search,
   Settings2,
@@ -32,6 +39,7 @@ import type {
   AudioSegment,
   AudioTrack,
   DependencyStatus,
+  JointSettings,
   MixProject,
   OperationProgress,
   SentenceGroup,
@@ -47,11 +55,17 @@ import {
   splitSegment,
   toggleSegment,
   trimSegment,
+  setGroupSpeed,
+  setJointOverride,
+  setJointDefaults,
+  effectiveJointSettings,
 } from "../domain/project";
 import { clock, secondsLabel } from "./format";
 import { Settings } from "./Settings";
 import { usePlayer } from "./usePlayer";
 import { Waveform } from "./Waveform";
+import { MasterTimeline } from "./MasterTimeline";
+import { JointDivider } from "./JointDivider";
 import type { EditorAction, EditorState } from "./editor";
 import { loadDependencies, rememberDependencies } from "./dependencies";
 
@@ -63,7 +77,10 @@ export interface WorkspaceProps {
   onThemeChange: (theme: StudioTheme) => void;
   onOpenProject: (project: MixProject) => void;
   onBusyChange: (id: string, busy: boolean) => void;
-  autosaveState: "saving" | "saved" | "error";
+  showQuickGuide: boolean;
+  onExported: () => void;
+  onRequestDemo: () => void;
+  demoRequest: number;
 }
 export const Workspace = memo(function Workspace({
   editor,
@@ -73,7 +90,10 @@ export const Workspace = memo(function Workspace({
   onThemeChange,
   onOpenProject,
   onBusyChange,
-  autosaveState,
+  showQuickGuide,
+  onExported,
+  onRequestDemo,
+  demoRequest,
 }: WorkspaceProps) {
   const { project, past, future } = editor;
   const history = { past, future };
@@ -92,7 +112,6 @@ export const Workspace = memo(function Workspace({
   const [selected, setSelected] = useState<string | null>(null);
   const [cutTool, setCutTool] = useState(false);
   const [zoom, setZoom] = useState(1);
-  const [saving, setSaving] = useState(false);
   const busy = working;
   const operation = useRef(false);
   const clips = useMemo(() => masterClips(project), [project]);
@@ -240,12 +259,11 @@ export const Workspace = memo(function Workspace({
   const save = useCallback(
     (saveAs = false) => {
       if (operation.current) return;
-      setSaving(true);
       void run(async () => {
         const snapshot = projectRef.current;
         const path = await window.studio.saveProject(snapshot, saveAs);
         if (path) setNotice("Project saved.");
-      }).finally(() => setSaving(false));
+      });
     },
     [run],
   );
@@ -265,10 +283,13 @@ export const Workspace = memo(function Workspace({
           projectRef.current,
           format,
         );
-        if (path) setNotice(`Exported ${format.toUpperCase()}.`);
+        if (path) {
+          onExported();
+          setNotice(`Exported ${format.toUpperCase()}.`);
+        }
       });
     },
-    [run],
+    [run, onExported],
   );
   const demo = useCallback(() => {
     void run(async () => {
@@ -277,6 +298,13 @@ export const Workspace = memo(function Workspace({
       setNotice("Sample project opened.");
     });
   }, [run, adopt, project.id]);
+  const handledDemo = useRef(0);
+  useEffect(() => {
+    if (active && demoRequest && handledDemo.current !== demoRequest) {
+      handledDemo.current = demoRequest;
+      demo();
+    }
+  }, [active, demoRequest, demo]);
   useEffect(() => {
     const shortcut = (e: Event) => {
       const action = (e as CustomEvent<string>).detail;
@@ -421,6 +449,29 @@ export const Workspace = memo(function Workspace({
     (id: string, time: number) => edit((p) => splitSegment(p, id, time)),
     [edit],
   );
+  const precedingAudibleGroup = useMemo(() => {
+    const audible = new Set(
+      project.segments.filter((s) => s.enabled).map((s) => s.groupId),
+    );
+    const result = new Map<string, SentenceGroup>();
+    let previous: SentenceGroup | undefined;
+    for (const group of project.groups) {
+      if (!audible.has(group.id)) continue;
+      if (previous) result.set(group.id, previous);
+      previous = group;
+    }
+    return result;
+  }, [project]);
+  const changeSpeed = useCallback(
+    (groupId: string, speed: number) =>
+      edit((p) => setGroupSpeed(p, groupId, speed)),
+    [edit],
+  );
+  const changeJoint = useCallback(
+    (left: string, right: string, settings: Partial<JointSettings>) =>
+      edit((p) => setJointOverride(p, left, right, settings)),
+    [edit],
+  );
   const filteredGroups = project.groups.filter((group) =>
     `${group.text} ${group.note}`.toLowerCase().includes(query.toLowerCase()),
   );
@@ -470,23 +521,13 @@ export const Workspace = memo(function Workspace({
         <div className="take-list">
           {project.tracks.length ? (
             project.tracks.map((track, i) => (
-              <div className="take" key={track.id}>
-                <span
-                  className="take-symbol"
-                  style={{
-                    color: track.color,
-                    backgroundColor: `${track.color}14`,
-                  }}
-                >
-                  <FileAudio2 size={19} />
-                </span>
-                <div className="take-info">
-                  <strong title={track.name}>{track.name}</strong>
-                  <span>
-                    {clock(track.duration)}
-                    <span className="take-divider">·</span>Take {i + 1}
-                  </span>
-                </div>
+              <div
+                className="take"
+                key={track.id}
+                title={track.name}
+                style={{ "--take-color": track.color } as React.CSSProperties}
+              >
+                <strong className="take-filename">{track.name}</strong>
                 <button
                   className="take-remove icon-button"
                   disabled={busy}
@@ -496,13 +537,28 @@ export const Workspace = memo(function Workspace({
                 >
                   <X size={13} />
                 </button>
-                <div className="take-status">
-                  {track.transcript ? (
-                    <Check size={10} />
-                  ) : (
-                    <span className="dot amber" />
-                  )}
-                  {track.transcript ? "Transcribed" : "Not transcribed"}
+                <div className="take-detail">
+                  <span className="take-symbol">
+                    <FileAudio2 size={20} />
+                  </span>
+                  <div className="take-info">
+                    <span className="take-name">Take {i + 1}</span>
+                    <span className="take-metadata">
+                      {clock(track.duration)}
+                      <span className="take-divider">·</span>
+                      <strong>
+                        {Math.round(
+                          (clips
+                            .filter((c) => c.trackId === track.id)
+                            .reduce((sum, c) => sum + c.duration, 0) /
+                            (clips.reduce((sum, c) => sum + c.duration, 0) ||
+                              1)) *
+                            100,
+                        )}
+                        % of mix
+                      </strong>
+                    </span>
+                  </div>
                 </div>
               </div>
             ))
@@ -521,97 +577,59 @@ export const Workspace = memo(function Workspace({
           <Plus size={16} />
           Add audio takes
         </button>
+        <div className="export-wrap">
+          <button
+            className="button primary"
+            disabled={busy || !clips.length}
+            onClick={() => setExportMenu((v) => !v)}
+            aria-expanded={exportMenu}
+          >
+            <Download size={15} />
+            Export master
+            <ChevronDown size={13} />
+          </button>
+          {exportMenu && (
+            <>
+              <div
+                className="menu-dismiss"
+                onClick={() => setExportMenu(false)}
+              />
+              <div className="export-menu">
+                <button onClick={() => exportAudio("wav")}>
+                  <FileAudio2 size={16} />
+                  <div>
+                    <strong>WAV audio</strong>
+                    <small>Lossless · 48 kHz · 24-bit</small>
+                  </div>
+                </button>
+                <button onClick={() => exportAudio("mp3")}>
+                  <FileAudio2 size={16} />
+                  <div>
+                    <strong>MP3 audio</strong>
+                    <small>Compact · 320 kbps</small>
+                  </div>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
         <div className="sidebar-bottom">
+          {showQuickGuide && (
+            <button
+              className="sidebar-button guide-button"
+              onClick={() => setHelp(true)}
+            >
+              <CircleHelp size={16} />
+              Quick guide
+            </button>
+          )}
           <button className="sidebar-button" onClick={() => setSettings(true)}>
             <Settings2 size={16} />
             Studio settings
-            <span
-              className={`dot ${status?.codex.available && status.whisperx.available && status.ffmpeg.available ? "green" : "amber"}`}
-            />
-          </button>
-          <button className="sidebar-button" onClick={() => setHelp(true)}>
-            <CircleHelp size={16} />
-            Quick guide<span className="key">?</span>
           </button>
         </div>
       </aside>
       <main>
-        <header className="workspace-header">
-          <span className="project-summary">
-            {project.tracks.length}{" "}
-            {project.tracks.length === 1 ? "take" : "takes"}
-          </span>
-          <div className="header-actions">
-            <button
-              className="icon-button"
-              title="Open project · ⌘O"
-              aria-label="Open project"
-              disabled={busy}
-              onClick={open}
-            >
-              <FolderOpen size={18} />
-            </button>
-            <button
-              className="icon-button"
-              title="Save project · ⌘S"
-              aria-label="Save project"
-              disabled={busy || !project.tracks.length}
-              onClick={() => save()}
-            >
-              {saving ? (
-                <LoaderCircle size={18} className="spin" />
-              ) : (
-                <Save size={18} />
-              )}
-            </button>
-            <span className="header-divider" />
-            <button
-              className="button secondary import-button"
-              disabled={busy}
-              onClick={() => importAudio()}
-            >
-              <Plus size={16} />
-              Import audio
-            </button>
-            <div className="export-wrap">
-              <button
-                className="button primary"
-                disabled={busy || !clips.length}
-                onClick={() => setExportMenu((v) => !v)}
-                aria-expanded={exportMenu}
-              >
-                <Download size={15} />
-                Export master
-                <ChevronDown size={13} />
-              </button>
-              {exportMenu && (
-                <>
-                  <div
-                    className="menu-dismiss"
-                    onClick={() => setExportMenu(false)}
-                  />
-                  <div className="export-menu">
-                    <button onClick={() => exportAudio("wav")}>
-                      <FileAudio2 size={16} />
-                      <div>
-                        <strong>WAV audio</strong>
-                        <small>Lossless · 48 kHz · 24-bit</small>
-                      </div>
-                    </button>
-                    <button onClick={() => exportAudio("mp3")}>
-                      <FileAudio2 size={16} />
-                      <div>
-                        <strong>MP3 audio</strong>
-                        <small>Compact · 320 kbps</small>
-                      </div>
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        </header>
-
         <section className="master-section" aria-label="Master audio timeline">
           <div className="master-heading">
             <div className="master-title">
@@ -626,77 +644,15 @@ export const Workspace = memo(function Workspace({
               <strong>{clock(duration, true)}</strong>
             </span>
           </div>
-          <div className="master-timeline">
-            <div className="ruler">
-              {Array.from({ length: 7 }, (_, i) => (
-                <span key={i}>{clock((duration * i) / 6)}</span>
-              ))}
-            </div>
-            <div
-              className="master-clips"
-              onClick={(e) => {
-                if (duration)
-                  player.seek(
-                    ((e.clientX -
-                      e.currentTarget.getBoundingClientRect().left) /
-                      e.currentTarget.clientWidth) *
-                      duration,
-                  );
-              }}
-            >
-              {clips.length ? (
-                clips.map((clip, i) => {
-                  const track = project.tracks.find(
-                    (t) => t.id === clip.trackId,
-                  )!;
-                  const group = project.groups.find(
-                    (g) => g.id === clip.groupId,
-                  );
-                  return (
-                    <div
-                      className="master-clip"
-                      key={clip.id}
-                      style={{
-                        width: `${(clip.duration / duration) * 100}%`,
-                        color: track.color,
-                        background: `${track.color}16`,
-                      }}
-                      title={`${group?.text ?? clip.text} · ${track.name}`}
-                    >
-                      <span className="master-clip-label">
-                        {String(i + 1).padStart(2, "0")}
-                        <span>{clip.text}</span>
-                      </span>
-                      <Waveform
-                        peaks={track.peaks}
-                        start={clip.start / track.duration}
-                        end={clip.end / track.duration}
-                        bars={Math.max(
-                          10,
-                          Math.round((clip.duration / duration) * 220),
-                        )}
-                      />
-                    </div>
-                  );
-                })
-              ) : (
-                <div className="master-empty">
-                  <AudioLines size={26} strokeWidth={1} />
-                  <span>No clips selected</span>
-                </div>
-              )}
-              {!!clips.length && (
-                <div
-                  className="playhead"
-                  style={{
-                    left: `${Math.min(100, (player.position / duration) * 100)}%`,
-                  }}
-                >
-                  <span />
-                </div>
-              )}
-            </div>
-          </div>
+          <MasterTimeline
+            project={project}
+            clips={clips}
+            duration={duration}
+            position={player.position}
+            active={active}
+            following={player.playing && !player.previewId}
+            onSeek={player.seek}
+          />
           <div className="transport">
             <div className="transport-left">
               <button
@@ -889,14 +845,6 @@ export const Workspace = memo(function Workspace({
               Import your audio
             </button>
             <span className="file-formats">or drop audio files here</span>
-            <button
-              className="text-button demo-button"
-              disabled={busy}
-              onClick={demo}
-            >
-              <Play size={13} />
-              Open sample project
-            </button>
           </div>
         ) : (
           <section
@@ -936,20 +884,44 @@ export const Workspace = memo(function Workspace({
                   </label>
                 </div>
                 <div className="sentence-list">
-                  {filteredGroups.map((group) => (
-                    <SentenceRow
-                      key={group.id}
-                      group={group}
-                      index={project.groups.indexOf(group)}
-                      project={project}
-                      disabled={busy}
-                      previewId={player.previewId}
-                      onPreview={player.previewMany}
-                      onChoose={choose}
-                      onSkip={skip}
-                      onMove={move}
-                    />
-                  ))}
+                  {filteredGroups.map((group) => {
+                    const index = project.groups.indexOf(group);
+                    const previous = precedingAudibleGroup.get(group.id);
+                    return (
+                      <Fragment key={group.id}>
+                        {previous && !query && (
+                          <JointDivider
+                            value={effectiveJointSettings(
+                              project,
+                              previous.id,
+                              group.id,
+                            )}
+                            disabled={busy}
+                            before={project.groups.indexOf(previous) + 1}
+                            after={index + 1}
+                            onChange={(update) =>
+                              changeJoint(previous.id, group.id, update)
+                            }
+                          />
+                        )}
+                        {index > 0 && !previous && !query && (
+                          <div className="sentence-separator" />
+                        )}
+                        <SentenceRow
+                          group={group}
+                          index={index}
+                          project={project}
+                          disabled={busy}
+                          previewId={player.previewId}
+                          onPreview={player.previewMany}
+                          onChoose={choose}
+                          onSkip={skip}
+                          onMove={move}
+                          onSpeed={changeSpeed}
+                        />
+                      </Fragment>
+                    );
+                  })}
                 </div>
                 {!filteredGroups.length && (
                   <div className="no-results">
@@ -1043,16 +1015,6 @@ export const Workspace = memo(function Workspace({
             )}
           </section>
         )}
-        <footer className="workspace-footer">
-          <span
-            className={`dot ${autosaveState === "error" ? "amber" : "green"}`}
-          />
-          {autosaveState === "saving"
-            ? "Saving…"
-            : autosaveState === "error"
-              ? "Autosave failed"
-              : "Saved"}
-        </footer>
       </main>
       {active && dragging && (
         <div className="drop-overlay">
@@ -1072,7 +1034,12 @@ export const Workspace = memo(function Workspace({
           onCancel={() => void window.studio.cancel(project.id)}
           onClose={() => setSettings(false)}
           onChangeModel={(model) => edit((p) => ({ ...p, model }))}
-          onFade={(joinFadeMs) => edit((p) => ({ ...p, joinFadeMs }))}
+          onJointDefaults={(update) => edit((p) => setJointDefaults(p, update))}
+          onCodexChange={(codex) => edit((p) => ({ ...p, codex }))}
+          onGuide={() => {
+            setSettings(false);
+            setHelp(true);
+          }}
           onRefresh={() => void refresh(true)}
           onSetup={() =>
             void run(async () => {
@@ -1159,9 +1126,9 @@ export const Workspace = memo(function Workspace({
               <li>
                 <strong>Pick the voice you like.</strong>
                 <p>
-                  Preview each sentence with the play button. Click “Use take”
-                  to add that version to the master. A sentence unique to one
-                  take has its own group.
+                  Preview each sentence with the play button. Click a card to
+                  use that version in the master. A sentence unique to one take
+                  has its own group.
                 </p>
               </li>
               <li>
@@ -1183,7 +1150,14 @@ export const Workspace = memo(function Workspace({
                 <kbd>C</kbd>Cut tool
               </span>
             </div>
-            <button className="button primary" onClick={() => setHelp(false)}>
+            <button
+              className="button primary"
+              disabled={busy}
+              onClick={() => {
+                setHelp(false);
+                onRequestDemo();
+              }}
+            >
               Let’s make a mix
             </button>
           </section>
@@ -1203,6 +1177,7 @@ const SentenceRow = memo(function SentenceRow({
   onChoose,
   onSkip,
   onMove,
+  onSpeed,
 }: {
   group: SentenceGroup;
   index: number;
@@ -1213,6 +1188,7 @@ const SentenceRow = memo(function SentenceRow({
   onChoose: (groupId: string, trackId: string) => void;
   onSkip: (groupId: string) => void;
   onMove: (groupId: string, direction: -1 | 1) => void;
+  onSpeed: (groupId: string, speed: number) => void;
 }) {
   const segments = project.segments.filter((s) => s.groupId === group.id);
   const variations = project.tracks.flatMap((track) => {
@@ -1259,6 +1235,29 @@ const SentenceRow = memo(function SentenceRow({
               <span className="custom-badge">Custom mix</span>
             )}
             {skipped && <span className="unique-badge">Skipped</span>}
+            <div
+              className="sentence-speed"
+              role="group"
+              aria-label={`Sentence ${index + 1} speed`}
+            >
+              <button
+                className="icon-button"
+                aria-label={`Decrease sentence ${index + 1} speed`}
+                disabled={disabled || (group.speed ?? 1) <= 0.5}
+                onClick={() => onSpeed(group.id, (group.speed ?? 1) - 0.25)}
+              >
+                <Minus size={12} />
+              </button>
+              <span aria-live="polite">{group.speed ?? 1}x</span>
+              <button
+                className="icon-button"
+                aria-label={`Increase sentence ${index + 1} speed`}
+                disabled={disabled || (group.speed ?? 1) >= 2.5}
+                onClick={() => onSpeed(group.id, (group.speed ?? 1) + 0.25)}
+              >
+                <Plus size={12} />
+              </button>
+            </div>
             <button
               className="icon-button skip-button"
               disabled={disabled || skipped}
@@ -1289,17 +1288,14 @@ const SentenceRow = memo(function SentenceRow({
                 key={track.id}
                 style={{ "--take-color": track.color } as React.CSSProperties}
               >
-                <div className="variation-top">
-                  <span className="track-indicator" />
-                  <span className="variation-name" title={track.name}>
-                    {track.name}
-                  </span>
-                  <span className="variation-time">
-                    {secondsLabel(
-                      parts.reduce((n, s) => n + s.end - s.start, 0),
-                    )}
-                  </span>
-                </div>
+                <button
+                  className="variation-select"
+                  disabled={disabled}
+                  aria-label={`Use ${track.name} for sentence ${index + 1}`}
+                  aria-pressed={chosen}
+                  title={parts.map((part) => part.text).join(" ")}
+                  onClick={() => onChoose(group.id, track.id)}
+                />
                 <div className="variation-wave">
                   <button
                     className={`preview-button ${isPlaying ? "playing" : ""}`}
@@ -1319,35 +1315,15 @@ const SentenceRow = memo(function SentenceRow({
                     end={end / track.duration}
                     bars={65}
                   />
-                </div>
-                {parts.map((p) => p.text).join(" ") !== group.text && (
-                  <p className="variation-text">
-                    {parts.map((p) => p.text).join(" ")}
-                  </p>
-                )}
-                <button
-                  className={`choose-button ${chosen ? "selected" : ""}`}
-                  disabled={disabled}
-                  aria-label={`Use ${track.name} for sentence ${index + 1}`}
-                  aria-pressed={chosen}
-                  onClick={() => onChoose(group.id, track.id)}
-                >
-                  {chosen ? (
-                    <Check size={12} />
-                  ) : partial ? (
-                    <SlidersHorizontal size={12} />
-                  ) : (
-                    <Plus size={12} />
-                  )}
-                  <span>
-                    {chosen
-                      ? "Selected"
-                      : partial
-                        ? "Use full take"
-                        : "Use take"}
+                  <span className="variation-time">
+                    {secondsLabel(
+                      parts.reduce(
+                        (total, part) => total + part.end - part.start,
+                        0,
+                      ) / (group.speed ?? 1),
+                    )}
                   </span>
-                  {chosen && <span className="selected-dot" />}
-                </button>
+                </div>
               </div>
             );
           })}

@@ -74,7 +74,7 @@ describe("independent project tabs", () => {
       id: a.id,
       action: { type: "undo" },
     });
-    expect(state.editors[1].project.joinFadeMs).toBe(8);
+    expect(state.editors[1].project.joinFadeMs).toBe(a.joinFadeMs);
   });
   it("restores tabs, closed snapshots, names, active selection, and appearance", () => {
     const a = newProject("One"),

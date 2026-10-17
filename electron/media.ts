@@ -398,7 +398,9 @@ export async function decodeAudioSlice(
   start: number,
   end: number,
   signal?: AbortSignal,
+  speed = 1,
 ): Promise<ArrayBuffer> {
+  validatePlaybackSpeed(speed);
   const track = store.track(id);
   if (
     ![start, end].every(Number.isFinite) ||
@@ -418,6 +420,8 @@ export async function decodeAudioSlice(
   if (endSample <= startSample)
     throw new Error("A preview must contain at least one audio sample.");
   const ffmpeg = await findBinary("ffmpeg");
+  const sourceFrames = endSample - startSample;
+  const outputFrames = Math.round(sourceFrames / speed);
   const result = await runProcess(
     ffmpeg,
     [
@@ -427,10 +431,19 @@ export async function decodeAudioSlice(
       "-nostdin",
       "-ss",
       (startSample / 48000).toFixed(9),
+      "-t",
+      (sourceFrames / 48000).toFixed(9),
       "-i",
       store.filename(id),
-      "-t",
-      ((endSample - startSample) / 48000).toFixed(9),
+      "-af",
+      [
+        `atrim=end_sample=${sourceFrames}`,
+        "asetpts=PTS-STARTPTS",
+        "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo",
+        ...tempoFilters(speed),
+        `apad=whole_len=${outputFrames}`,
+        `atrim=end_sample=${outputFrames}`,
+      ].join(","),
       "-ar",
       "48000",
       "-ac",
@@ -441,11 +454,46 @@ export async function decodeAudioSlice(
     ],
     {
       signal,
-      maxBytes: (endSample - startSample) * 2 * 4 + 8192,
+      maxBytes: outputFrames * 2 * 4 + 8192,
       timeoutMs: 60_000,
     },
   );
   return Uint8Array.from(result.stdout).buffer;
+}
+
+function validatePlaybackSpeed(speed: number): void {
+  if (
+    !Number.isFinite(speed) ||
+    speed < 0.5 ||
+    speed > 2.5 ||
+    !Number.isInteger(speed * 4)
+  )
+    throw new Error("Audio speed must be 0.5×–2.5× in 0.25× steps.");
+}
+
+/** Chain atempo above 2× to retain speech pitch without skipped analysis windows. */
+function tempoFilters(speed: number): string[] {
+  if (speed === 1) return [];
+  return speed > 2 ? ["atempo=2", `atempo=${speed / 2}`] : [`atempo=${speed}`];
+}
+
+function clipFades(
+  duration: number,
+  fadeInMs: number,
+  fadeOutMs: number,
+): { fadeIn: number; fadeOut: number } {
+  if (
+    ![fadeInMs, fadeOutMs].every(
+      (value) => Number.isFinite(value) && value >= 0 && value <= 5000,
+    )
+  )
+    throw new Error("Clip fades must be between 0 and 5000 milliseconds.");
+  const total = (fadeInMs + fadeOutMs) / 1000;
+  const factor = total > duration ? duration / total : 1;
+  return {
+    fadeIn: (fadeInMs / 1000) * factor,
+    fadeOut: (fadeOutMs / 1000) * factor,
+  };
 }
 
 export async function renderMaster(
@@ -486,12 +534,42 @@ export async function renderMaster(
       clip.end > track.duration + 0.03
     )
       throw new Error("A selected clip has invalid audio boundaries.");
-    const duration = clip.end - clip.start;
-    const fade = Math.max(0, Math.min(20, fadeMs)) / 1000;
-    const edge = Math.min(fade, duration / 2);
-    filters.push(
-      `[${labels.get(clip.trackId)!.shift()}]atrim=start=${clip.start.toFixed(6)}:end=${clip.end.toFixed(6)},asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo${edge ? `,afade=t=in:st=0:d=${edge},afade=t=out:st=${Math.max(0, duration - edge)}:d=${edge}` : ""}[c${index}]`,
+    const speed = clip.speed ?? 1;
+    validatePlaybackSpeed(speed);
+    const startFrame = Math.max(0, Math.round(clip.start * 48000));
+    const endFrame = Math.min(
+      Math.round(track.duration * 48000),
+      Math.round(clip.end * 48000),
     );
+    const outputFrames = Math.round((endFrame - startFrame) / speed);
+    if (outputFrames < 1)
+      throw new Error("A selected clip has no audible samples.");
+    const duration = outputFrames / 48000;
+    const fade = clipFades(
+      duration,
+      clip.fadeInMs ?? Math.max(0, Math.min(20, fadeMs)),
+      clip.fadeOutMs ?? Math.max(0, Math.min(20, fadeMs)),
+    );
+    const pause = clip.pauseBeforeMs ?? 0;
+    if (!Number.isFinite(pause) || pause < 0 || pause > 10_000)
+      throw new Error("A clip pause must be between 0 and 10000 milliseconds.");
+    const pauseFrames = Math.round(pause * 48);
+    const audioLabel = pauseFrames ? `a${index}` : `c${index}`;
+    filters.push(
+      `[${labels.get(clip.trackId)!.shift()}]atrim=start_sample=${startFrame}:end_sample=${endFrame},asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo${tempoFilters(
+        speed,
+      )
+        .map((filter) => `,${filter}`)
+        .join(
+          "",
+        )},apad=whole_len=${outputFrames},atrim=end_sample=${outputFrames}${fade.fadeIn ? `,afade=t=in:st=0:d=${fade.fadeIn}` : ""}${fade.fadeOut ? `,afade=t=out:st=${Math.max(0, duration - fade.fadeOut)}:d=${fade.fadeOut}` : ""}[${audioLabel}]`,
+    );
+    if (pauseFrames) {
+      filters.push(
+        `anullsrc=r=48000:cl=stereo,atrim=end_sample=${pauseFrames},asetpts=PTS-STARTPTS[p${index}]`,
+      );
+      filters.push(`[p${index}][${audioLabel}]concat=n=2:v=0:a=1[c${index}]`);
+    }
   }
   filters.push(
     `${clips.map((_, i) => `[c${i}]`).join("")}concat=n=${clips.length}:v=0:a=1[out]`,
@@ -502,7 +580,14 @@ export async function renderMaster(
     `.${path.basename(destination)}.${randomUUID()}.${format}`,
   );
   const duration = clips.reduce(
-    (total, clip) => total + clip.end - clip.start,
+    (total, clip) =>
+      total +
+      Math.round(
+        (Math.round(clip.end * 48000) - Math.round(clip.start * 48000)) /
+          (clip.speed ?? 1),
+      ) /
+        48000 +
+      Math.round((clip.pauseBeforeMs ?? 0) * 48) / 48000,
     0,
   );
   try {

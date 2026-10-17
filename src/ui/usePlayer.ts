@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AudioSegment, MasterClip, MixProject } from "../shared/types";
 import {
   deinterleavePCM,
-  edgeFadeSeconds,
+  chunkGainEnvelope,
   PCM_SAMPLE_RATE,
   planPlayback,
   type PlaybackChunk,
@@ -108,6 +108,14 @@ export function usePlayer(
         if (run !== generation.current) return;
 
         const decode = (chunk: PlaybackChunk): Promise<AudioBuffer> => {
+          if (chunk.silent)
+            return Promise.resolve(
+              audio.createBuffer(
+                2,
+                Math.max(1, Math.round(chunk.duration * PCM_SAMPLE_RATE)),
+                PCM_SAMPLE_RATE,
+              ),
+            );
           const hit = buffers.current.get(chunk.key);
           if (hit) {
             buffers.current.delete(chunk.key);
@@ -117,7 +125,7 @@ export function usePlayer(
           const existing = pending.current.get(chunk.key);
           if (existing) return existing;
           const request = window.studio
-            .audioSlice(chunk.trackId, chunk.start, chunk.end)
+            .audioSlice(chunk.trackId, chunk.start, chunk.end, chunk.speed ?? 1)
             .then((bytes) => {
               const [left, right] = deinterleavePCM(bytes);
               if (left.length / PCM_SAMPLE_RATE < chunk.duration - 0.001)
@@ -194,17 +202,16 @@ export function usePlayer(
             source.buffer = buffer;
             source.connect(gain);
             gain.connect(audio.destination);
-            const fade = edgeFadeSeconds(
-              { ...chunk, duration },
-              project.joinFadeMs,
-            );
-            gain.gain.setValueAtTime(fade.fadeIn ? 0 : 1, start);
-            if (fade.fadeIn)
-              gain.gain.linearRampToValueAtTime(1, start + fade.fadeIn);
-            if (fade.fadeOut) {
-              gain.gain.setValueAtTime(1, start + duration - fade.fadeOut);
-              gain.gain.linearRampToValueAtTime(0, start + duration);
-            }
+            const envelope = chunkGainEnvelope({ ...chunk, duration });
+            envelope.forEach((point, index) => {
+              if (index === 0)
+                gain.gain.setValueAtTime(point.value, start + point.time);
+              else
+                gain.gain.linearRampToValueAtTime(
+                  point.value,
+                  start + point.time,
+                );
+            });
             sources.current.set(source, { gain, chunk, start, duration });
             source.onended = () => {
               sources.current.delete(source);
@@ -270,27 +277,18 @@ export function usePlayer(
         }
       }
     },
-    [stop, project.joinFadeMs, clockPosition],
+    [stop, clockPosition],
   );
 
   const playMaster = useCallback(
     (from = positionRef.current) => {
-      const duration = clips.reduce((total, clip) => total + clip.duration, 0);
+      const last = clips[clips.length - 1];
+      const duration = last ? last.offset + last.duration : 0;
       const at =
         !Number.isFinite(from) || from >= duration - 0.001
           ? 0
           : Math.max(0, from);
-      void playItems(
-        clips.map((clip) => ({
-          id: clip.id,
-          trackId: clip.trackId,
-          start: clip.start,
-          end: clip.end,
-          offset: clip.offset,
-        })),
-        at,
-        null,
-      );
+      void playItems(clips, at, null);
     },
     [clips, playItems],
   );
@@ -306,14 +304,36 @@ export function usePlayer(
         return;
       }
       let offset = 0;
-      const items = segments.map((segment) => {
-        const item = { ...segment, offset };
-        offset += segment.end - segment.start;
+      const items = segments.map((segment, index) => {
+        const speed =
+          project.groups.find((group) => group.id === segment.groupId)?.speed ??
+          1;
+        const groupClips = clips.filter(
+          (clip) => clip.groupId === segment.groupId,
+        );
+        const duration =
+          Math.round(
+            (Math.round(segment.end * PCM_SAMPLE_RATE) -
+              Math.round(segment.start * PCM_SAMPLE_RATE)) /
+              speed,
+          ) / PCM_SAMPLE_RATE;
+        const item = {
+          ...segment,
+          offset,
+          speed,
+          duration,
+          fadeInMs: index === 0 ? (groupClips[0]?.fadeInMs ?? 0) : 0,
+          fadeOutMs:
+            index === segments.length - 1
+              ? (groupClips[groupClips.length - 1]?.fadeOutMs ?? 0)
+              : 0,
+        };
+        offset += duration;
         return item;
       });
       void playItems(items, 0, segments[0].id);
     },
-    [playItems, stop],
+    [playItems, stop, project.groups, clips],
   );
   const preview = useCallback(
     (segment: AudioSegment) => previewMany([segment]),
@@ -324,7 +344,8 @@ export function usePlayer(
       const wasPlaying =
         (session.current.active && session.current.preview === null) ||
         resumeAfterSeek.current;
-      const duration = clips.reduce((total, clip) => total + clip.duration, 0);
+      const last = clips[clips.length - 1];
+      const duration = last ? last.offset + last.duration : 0;
       const at = Math.max(
         0,
         Math.min(duration, Number.isFinite(value) ? value : 0),

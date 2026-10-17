@@ -45,7 +45,10 @@ try {
     throw new Error(
       "Installed app could not find the actual tools/default model.",
     );
-  await page.getByRole("button", { name: /Open sample project/ }).click();
+  await page.getByRole("button", { name: "Quick guide", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Let’s make a mix", exact: true })
+    .click();
   await expect(page.locator(".sentence-row")).toHaveCount(4, {
     timeout: 90_000,
   });

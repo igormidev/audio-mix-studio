@@ -16,6 +16,7 @@ import {
   rename,
   rm,
   realpath,
+  open as openFile,
 } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -37,12 +38,14 @@ import {
   masterClips,
   applyAlignment,
   parseProject,
+  sentenceSpeeds,
 } from "../src/domain/project";
 import {
   checkDependencies,
   setupTranscription,
   transcribe,
   alignTranscripts,
+  discoverCodexModels,
 } from "./integrations/index";
 import {
   MediaStore,
@@ -55,7 +58,13 @@ import {
   findBinary,
   decodeAudioSlice,
 } from "./media";
-import { checkedTheme, ProjectTaskQueue, WorkspaceStore } from "./workspace";
+import {
+  checkedTheme,
+  PreferencesStore,
+  ProjectTaskQueue,
+  UnavailableProjectMediaError,
+  WorkspaceStore,
+} from "./workspace";
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -82,6 +91,7 @@ let media: MediaStore;
 let cacheDirectory: string;
 let autosaveFile: string;
 let workspace: WorkspaceStore;
+let preferences: PreferencesStore;
 let workspaceMode = false;
 let currentProject: MixProject | null = null;
 let persistenceQueue: Promise<void> = Promise.resolve();
@@ -188,6 +198,36 @@ function checkedProject(value: unknown): MixProject {
     transcript: track.transcript,
   }));
   return parseProject(project);
+}
+async function restorableProject(value: unknown): Promise<MixProject> {
+  // A malformed project remains an error. Only unavailable app-owned audio
+  // qualifies for quietly dropping an individual tab during restoration.
+  const project = parseProject(value);
+  for (const track of project.tracks) {
+    if (!media.has(track.id)) throw new UnavailableProjectMediaError();
+    try {
+      const filename = media.filename(track.id);
+      const status = await lstat(filename);
+      if (!status.isFile() || status.isSymbolicLink() || status.size < 44)
+        throw new UnavailableProjectMediaError();
+      const file = await openFile(filename, "r");
+      try {
+        const header = Buffer.alloc(12);
+        const { bytesRead } = await file.read(header, 0, header.length, 0);
+        if (
+          bytesRead !== 12 ||
+          !["RIFF", "RF64"].includes(header.toString("ascii", 0, 4)) ||
+          header.toString("ascii", 8, 12) !== "WAVE"
+        )
+          throw new UnavailableProjectMediaError();
+      } finally {
+        await file.close();
+      }
+    } catch {
+      throw new UnavailableProjectMediaError();
+    }
+  }
+  return checkedProject(project);
 }
 function checkedModel(model: unknown): TranscriptionModel {
   if (!transcriptionModels.includes(model as TranscriptionModel))
@@ -547,7 +587,9 @@ async function demoProject(origin?: unknown): Promise<MixProject> {
 }
 
 function registerIPC() {
+  handle("studio:preferences", () => preferences.get());
   handle("studio:dependencies", () => checkDependencies(cacheDirectory));
+  handle("studio:codexModels", () => discoverCodexModels());
   handle("studio:import", (origin?: unknown) => {
     const projectId = checkedProjectId(origin);
     return withFileOperation(async (signal, report) => {
@@ -569,12 +611,16 @@ function registerIPC() {
   handle("studio:importPaths", importFiles);
   handle(
     "studio:audioSlice",
-    async (id: unknown, start: unknown, end: unknown) => {
+    async (id: unknown, start: unknown, end: unknown, speed: unknown = 1) => {
       if (closing) throw new Error("The studio is closing.");
       if (
         typeof id !== "string" ||
         typeof start !== "number" ||
-        typeof end !== "number"
+        typeof end !== "number" ||
+        typeof speed !== "number" ||
+        !Number.isFinite(speed) ||
+        speed < 0.5 ||
+        !sentenceSpeeds.includes(speed as (typeof sentenceSpeeds)[number])
       )
         throw new Error("Invalid preview request.");
       if (previewQueue.length >= 12)
@@ -585,7 +631,14 @@ function registerIPC() {
       activePreviews++;
       const controller = new AbortController();
       previewControllers.add(controller);
-      const task = decodeAudioSlice(media, id, start, end, controller.signal);
+      const task = decodeAudioSlice(
+        media,
+        id,
+        start,
+        end,
+        controller.signal,
+        speed,
+      );
       previewTasks.add(task);
       try {
         return await task;
@@ -620,7 +673,7 @@ function registerIPC() {
     return withOperation(async (signal, report) => {
       if (!project.tracks.length)
         throw new Error("Add audio before analyzing.");
-      const dependencies = await checkDependencies(cacheDirectory);
+      const dependencies = await checkDependencies(cacheDirectory, signal);
       if (!dependencies.codex.available)
         throw new Error(
           "Codex is required to organize sentences. Install Codex, sign in, and try again.",
@@ -648,6 +701,7 @@ function registerIPC() {
         cacheDirectory,
         report,
         signal,
+        project.codex,
       );
       const result = applyAlignment(project, alignment);
       await remember(result);
@@ -741,6 +795,8 @@ function registerIPC() {
             }),
         },
       );
+      signal.throwIfAborted();
+      await preferences.recordSuccessfulExport();
       return filename;
     }, project.id);
   });
@@ -810,6 +866,7 @@ async function createWindow() {
     },
   });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  void window.webContents.setVisualZoomLevelLimits(1, 1);
   window.webContents.on("will-navigate", (event, url) => {
     if (
       devURL
@@ -913,9 +970,21 @@ function createMenu() {
       {
         label: "View",
         submenu: [
-          { role: "resetZoom" },
-          { role: "zoomIn" },
-          { role: "zoomOut" },
+          {
+            label: "Reset timeline zoom",
+            accelerator: "CmdOrCtrl+0",
+            click: shortcut("timeline-zoom-reset"),
+          },
+          {
+            label: "Zoom in timeline",
+            accelerator: "CmdOrCtrl+Plus",
+            click: shortcut("timeline-zoom-in"),
+          },
+          {
+            label: "Zoom out timeline",
+            accelerator: "CmdOrCtrl+-",
+            click: shortcut("timeline-zoom-out"),
+          },
           { type: "separator" },
           { role: "togglefullscreen" },
         ],
@@ -952,7 +1021,14 @@ app
     await mkdir(cacheDirectory, { recursive: true });
     media = new MediaStore(root);
     await media.initialize();
-    workspace = new WorkspaceStore(root, checkedProject);
+    preferences = new PreferencesStore(root);
+    workspace = new WorkspaceStore(
+      root,
+      checkedProject,
+      atomicJSON,
+      undefined,
+      restorableProject,
+    );
     try {
       const remembered = await workspace.restore();
       if (remembered) {
@@ -1049,6 +1125,7 @@ app.on("before-quit", (event) => {
     Promise.race([processes, timeout]),
     persistenceQueue.catch(() => undefined),
     workspace?.flush().catch(() => undefined),
+    preferences?.flush().catch(() => undefined),
   ]);
   void cleanup
     .catch(() => undefined)

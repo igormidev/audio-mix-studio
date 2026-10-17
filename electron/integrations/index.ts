@@ -5,6 +5,7 @@ import { transcriptionModels } from "../../src/shared/types";
 import type {
   AlignmentResult,
   AudioTrack,
+  CodexSelection,
   DependencyStatus,
   OperationProgress,
   TimedText,
@@ -13,6 +14,7 @@ import type {
 } from "../../src/shared/types";
 import { alignWithCodex } from "./alignment";
 import { runCodex } from "./codex-launch";
+export { discoverCodexModels } from "./codex-models";
 import { digest } from "./files";
 import { runProcess } from "./process";
 import {
@@ -335,6 +337,7 @@ export async function alignTranscripts(
   cacheDir: string,
   onProgress: Progress,
   signal: AbortSignal,
+  selection?: CodexSelection,
 ): Promise<AlignmentResult> {
-  return alignWithCodex(tracks, cacheDir, onProgress, signal);
+  return alignWithCodex(tracks, cacheDir, onProgress, signal, selection);
 }

@@ -8,15 +8,38 @@ import {
   type SentenceGroup,
   type TimedText,
   type Transcript,
+  type JointSettings,
+  type CodexSelection,
+  type CodexModelInfo,
 } from "../shared/types";
 
-/** Keep a little breathing room around speech, without keeping long silent gaps. */
+/** Used only to recognize and migrate the previous automatic boundary policy. */
 export const ALIGNMENT_PADDING_SECONDS = 0.06;
+export const DEFAULT_JOINT_SETTINGS: JointSettings = {
+  pauseMs: 0,
+  fadeOutMs: 0,
+  fadeInMs: 0,
+};
+export const DEFAULT_CODEX_SELECTION: CodexSelection = {
+  model: "gpt-6-luna",
+  reasoning: "medium",
+  fast: false,
+};
+export const sentenceSpeeds = [
+  0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5,
+] as const;
 const EPSILON = 0.000001;
 const MAX_TRACKS = 64;
 const MAX_GROUPS = 20_000;
 const MAX_SEGMENTS = 50_000;
 const MAX_DURATION = 7 * 24 * 60 * 60;
+
+export class UnsupportedAudioSchemaError extends Error {
+  constructor(message = "This audio editing schema is not supported.") {
+    super(message);
+    this.name = "UnsupportedAudioSchemaError";
+  }
+}
 
 function id(prefix: string): string {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
@@ -35,9 +58,123 @@ export function newProject(name = "Untitled mix"): MixProject {
     groups: [],
     segments: [],
     model: "large-v3-turbo",
-    joinFadeMs: 8,
+    joinFadeMs: 0,
+    audioSchema: 2,
+    jointDefaults: { ...DEFAULT_JOINT_SETTINGS },
+    jointOverrides: {},
+    codex: { ...DEFAULT_CODEX_SELECTION },
     updatedAt: new Date().toISOString(),
   };
+}
+
+export function validCodexSelection(
+  value: CodexSelection | undefined,
+  models: CodexModelInfo[],
+): CodexSelection {
+  const choice = value ?? DEFAULT_CODEX_SELECTION;
+  const model =
+    models.find((model) => model.id === choice.model) ??
+    models.find((model) => model.isDefault) ??
+    models[0];
+  if (!model) return { ...choice };
+  return {
+    model: model.id,
+    reasoning: model.reasoning.includes(choice.reasoning)
+      ? choice.reasoning
+      : model.defaultReasoning,
+    fast: choice.fast && model.fast,
+  };
+}
+
+export function jointKey(leftGroupId: string, rightGroupId: string): string {
+  return JSON.stringify([leftGroupId, rightGroupId]);
+}
+
+export function effectiveJointSettings(
+  project: MixProject,
+  leftGroupId: string,
+  rightGroupId: string,
+): JointSettings {
+  return {
+    ...DEFAULT_JOINT_SETTINGS,
+    ...project.jointDefaults,
+    ...project.jointOverrides?.[jointKey(leftGroupId, rightGroupId)],
+  };
+}
+
+function checkedJoint(value: unknown, partial = false): Partial<JointSettings> {
+  const input = object(value, "Joint settings");
+  const result: Partial<JointSettings> = {};
+  for (const key of Object.keys(input)) {
+    if (!["pauseMs", "fadeOutMs", "fadeInMs"].includes(key))
+      throw new Error("Joint settings contain an unknown field.");
+  }
+  for (const key of ["pauseMs", "fadeOutMs", "fadeInMs"] as const) {
+    if (input[key] === undefined && partial) continue;
+    const value = number(input[key], `Joint ${key}`);
+    if (value < 0 || value > (key === "pauseMs" ? 10_000 : 5_000))
+      throw new Error(`Joint ${key} is outside its supported range.`);
+    result[key] = value;
+  }
+  return result;
+}
+
+export function setGroupSpeed(
+  project: MixProject,
+  groupId: string,
+  speed: number,
+): MixProject {
+  if (!sentenceSpeeds.includes(speed as (typeof sentenceSpeeds)[number]))
+    throw new Error("Sentence speed must be 0.5×–2.5× in 0.25× steps.");
+  const group = project.groups.find((group) => group.id === groupId);
+  if (!group) throw new Error("The selected sentence no longer exists.");
+  if ((group.speed ?? 1) === speed) return project;
+  return updated({
+    ...project,
+    groups: project.groups.map((group) =>
+      group.id === groupId ? { ...group, speed } : group,
+    ),
+  });
+}
+
+export function setJointDefaults(
+  project: MixProject,
+  settings: Partial<JointSettings>,
+): MixProject {
+  const jointDefaults = {
+    ...DEFAULT_JOINT_SETTINGS,
+    ...project.jointDefaults,
+    ...checkedJoint(settings, true),
+  };
+  return updated({ ...project, jointDefaults });
+}
+
+export function setJointOverride(
+  project: MixProject,
+  leftGroupId: string,
+  rightGroupId: string,
+  settings: Partial<JointSettings> | null,
+): MixProject {
+  if (
+    leftGroupId === rightGroupId ||
+    !project.groups.some((group) => group.id === leftGroupId) ||
+    !project.groups.some((group) => group.id === rightGroupId)
+  )
+    throw new Error("A joint must connect two existing sentences.");
+  const key = jointKey(leftGroupId, rightGroupId);
+  const jointOverrides = { ...project.jointOverrides };
+  if (settings === null) delete jointOverrides[key];
+  else {
+    const next = { ...jointOverrides[key] };
+    checkedJoint(settings, true);
+    for (const field of Object.keys(settings) as (keyof JointSettings)[]) {
+      if (settings[field] === undefined) delete next[field];
+      else next[field] = settings[field];
+    }
+    if (Object.keys(next).length) jointOverrides[key] = next;
+    else delete jointOverrides[key];
+  }
+  return updated({ ...project, jointOverrides });
 }
 
 /** Manual imports start as one full-length, active segment per source. */
@@ -72,6 +209,7 @@ export function appendTracks(
       text,
       note: "Full source audio. Analyze to organize it into sentence choices.",
       segmentIds: [segmentId],
+      speed: 1,
     });
     segments.push({
       id: segmentId,
@@ -117,8 +255,39 @@ export function masterClips(project: MixProject): MasterClip[] {
     for (const segment of active) {
       if (seen.has(segment.id)) continue;
       seen.add(segment.id);
-      const duration = segment.end - segment.start;
-      clips.push({ ...segment, offset, duration });
+      const sourceDuration =
+        (Math.round(segment.end * 48_000) -
+          Math.round(segment.start * 48_000)) /
+        48_000;
+      const speed = group.speed ?? 1;
+      const duration = Math.round((sourceDuration * 48_000) / speed) / 48_000;
+      let pauseBeforeMs = 0;
+      let fadeInMs = 0;
+      const previous = clips[clips.length - 1];
+      if (previous && previous.groupId !== group.id) {
+        const joint = effectiveJointSettings(
+          project,
+          previous.groupId,
+          group.id,
+        );
+        pauseBeforeMs = joint.pauseMs;
+        fadeInMs = Math.min(joint.fadeInMs, duration * 1000);
+        previous.fadeOutMs = Math.min(
+          joint.fadeOutMs,
+          previous.duration * 1000,
+        );
+        offset += Math.round(pauseBeforeMs * 48) / 48_000;
+      }
+      clips.push({
+        ...segment,
+        offset,
+        duration,
+        sourceDuration,
+        speed,
+        pauseBeforeMs,
+        fadeInMs,
+        fadeOutMs: 0,
+      });
       offset += duration;
     }
   }
@@ -126,10 +295,9 @@ export function masterClips(project: MixProject): MasterClip[] {
 }
 
 export function masterDuration(project: MixProject): number {
-  return masterClips(project).reduce(
-    (duration, clip) => duration + clip.duration,
-    0,
-  );
+  const clips = masterClips(project);
+  const last = clips[clips.length - 1];
+  return last ? last.offset + last.duration : 0;
 }
 
 /** A variation includes every surviving piece after manual splits or trims. */
@@ -305,11 +473,18 @@ export function removeTrack(project: MixProject, trackId: string): MixProject {
           : segment,
       );
   }
+  const survivingGroups = new Set(groups.map((group) => group.id));
+  const jointOverrides = Object.fromEntries(
+    Object.entries(project.jointOverrides ?? {}).filter(([key]) =>
+      (JSON.parse(key) as string[]).every((id) => survivingGroups.has(id)),
+    ),
+  );
   return updated({
     ...project,
     tracks: project.tracks.filter((track) => track.id !== trackId),
     segments,
     groups,
+    jointOverrides,
   });
 }
 
@@ -351,9 +526,8 @@ export const alignmentSchema = {
 } as const;
 
 /**
- * AI boundaries describe speech. Add at most 60 ms per side, clamping neighboring
- * segments to the midpoint of their silent gap. Long silence outside those padded
- * cuts is intentionally omitted. A source timestamp can never appear twice.
+ * Partition every source from zero through its end. Silence between spoken
+ * ranges belongs half to each neighbor; selecting a whole take preserves it.
  */
 export function applyAlignment(
   project: MixProject,
@@ -383,12 +557,15 @@ export function applyAlignment(
   const groups: SentenceGroup[] = inputGroups.map((value, index) => {
     const input = object(value, `Sentence ${index + 1}`);
     exactKeys(input, ["text", "note", "variations"], `Sentence ${index + 1}`);
-    const groupId = id("group");
+    const text = string(input.text, "Sentence text", 20_000);
+    const previous = previousGroups.get(normalizedSentence(text))?.shift();
+    const groupId = previous?.id ?? id("group");
     const group: SentenceGroup = {
       id: groupId,
-      text: string(input.text, "Sentence text", 20_000),
+      text,
       note: string(input.note, "Sentence note", 8_000, true),
       segmentIds: [],
+      speed: previous?.speed ?? 1,
     };
     const variations = array(
       input.variations,
@@ -429,9 +606,6 @@ export function applyAlignment(
         };
       })
       .sort((a, b) => (rank.get(a.trackId) ?? 0) - (rank.get(b.trackId) ?? 0));
-    const previous = previousGroups
-      .get(normalizedSentence(group.text))
-      ?.shift();
     const previousSelections = previous
       ? (previousEnabledTracks.get(previous.id) ?? new Set<string>())
       : undefined;
@@ -455,24 +629,136 @@ export function applyAlignment(
     const pieces = segments
       .filter((segment) => segment.trackId === track.id)
       .sort((a, b) => a.start - b.start);
-    // Compute every boundary before mutating pieces; padding cannot affect its neighbor's calculation.
+    // Compute all midpoints before mutating speech ranges.
     const boundaries = pieces.map((piece, index) => ({
-      start: Math.max(
-        0,
-        piece.start - ALIGNMENT_PADDING_SECONDS,
-        index ? (pieces[index - 1].end + piece.start) / 2 : 0,
-      ),
-      end: Math.min(
-        track.duration,
-        piece.end + ALIGNMENT_PADDING_SECONDS,
+      start: index ? sampleTime((pieces[index - 1].end + piece.start) / 2) : 0,
+      end:
         index < pieces.length - 1
-          ? (piece.end + pieces[index + 1].start) / 2
+          ? sampleTime((piece.end + pieces[index + 1].start) / 2)
           : track.duration,
-      ),
     }));
     pieces.forEach((piece, index) => Object.assign(piece, boundaries[index]));
   }
-  return updated({ ...project, groups, segments });
+  const ids = new Set(groups.map((group) => group.id));
+  const jointOverrides = Object.fromEntries(
+    Object.entries(project.jointOverrides ?? {}).filter(([key]) => {
+      const pair = JSON.parse(key) as string[];
+      return pair.every((id) => ids.has(id));
+    }),
+  );
+  return updated({
+    ...project,
+    audioSchema: 2,
+    groups,
+    segments,
+    jointOverrides,
+  });
+}
+
+function sampleTime(seconds: number): number {
+  return Math.round(seconds * 48_000) / 48_000;
+}
+
+/**
+ * Recover only entire tracks whose unsplit segments still exactly match the
+ * previous automatic 60 ms policy and independently match real transcript text.
+ * Any ambiguous match or changed boundary leaves the track untouched.
+ */
+function migrateLegacyBoundaries(
+  tracks: AudioTrack[],
+  segments: AudioSegment[],
+): AudioSegment[] {
+  const replacements = new Map<string, { start: number; end: number }>();
+  const compact = (text: string) => normalizedSentence(text).replace(/\s/g, "");
+  for (const track of tracks) {
+    if (!track.transcript) continue;
+    const pieces = segments
+      .filter((segment) => segment.trackId === track.id)
+      .sort((a, b) => a.start - b.start);
+    if (
+      !pieces.length ||
+      new Set(pieces.map((piece) => piece.groupId)).size !== pieces.length
+    )
+      continue;
+    const sources = [track.transcript.words, track.transcript.segments]
+      .filter((units) => units.length)
+      .map((units) => {
+        let text = "";
+        const starts = new Map<number, number>();
+        const ends = new Map<number, number>();
+        units.forEach((unit, index) => {
+          const token = compact(unit.text);
+          if (!token) return;
+          starts.set(text.length, index);
+          text += token;
+          ends.set(text.length, index);
+        });
+        return { units, text, starts, ends };
+      });
+    const speech: { start: number; end: number }[] = [];
+    for (const piece of pieces) {
+      const target = compact(piece.text);
+      const matches = new Map<string, { start: number; end: number }>();
+      if (target)
+        for (const source of sources) {
+          let position = source.text.indexOf(target);
+          while (position >= 0) {
+            const first = source.starts.get(position);
+            const last = source.ends.get(position + target.length);
+            if (first !== undefined && last !== undefined) {
+              const start = source.units[first].start;
+              const end = source.units[last].end;
+              if (
+                start >= piece.start - EPSILON &&
+                start - piece.start <= ALIGNMENT_PADDING_SECONDS + 1 / 48_000 &&
+                end <= piece.end + EPSILON &&
+                piece.end - end <= ALIGNMENT_PADDING_SECONDS + 1 / 48_000
+              )
+                matches.set(`${start}:${end}`, { start, end });
+            }
+            position = source.text.indexOf(target, position + 1);
+          }
+        }
+      if (matches.size !== 1) break;
+      speech.push([...matches.values()][0]);
+    }
+    if (speech.length !== pieces.length) continue;
+    const pristine = pieces.every((piece, index) => {
+      const expectedStart = Math.max(
+        0,
+        speech[index].start - ALIGNMENT_PADDING_SECONDS,
+        index ? (speech[index - 1].end + speech[index].start) / 2 : 0,
+      );
+      const expectedEnd = Math.min(
+        track.duration,
+        speech[index].end + ALIGNMENT_PADDING_SECONDS,
+        index < pieces.length - 1
+          ? (speech[index].end + speech[index + 1].start) / 2
+          : track.duration,
+      );
+      return (
+        Math.abs(piece.start - expectedStart) <= 1 / 48_000 &&
+        Math.abs(piece.end - expectedEnd) <= 1 / 48_000
+      );
+    });
+    if (!pristine) continue;
+    pieces.forEach((piece, index) =>
+      replacements.set(piece.id, {
+        start: index
+          ? sampleTime((speech[index - 1].end + speech[index].start) / 2)
+          : 0,
+        end:
+          index < pieces.length - 1
+            ? sampleTime((speech[index].end + speech[index + 1].start) / 2)
+            : track.duration,
+      }),
+    );
+  }
+  return segments.map((segment) =>
+    replacements.has(segment.id)
+      ? { ...segment, ...replacements.get(segment.id)! }
+      : segment,
+  );
 }
 
 function normalizedSentence(text: string): string {
@@ -660,8 +946,17 @@ function ensureNoOverlap(segments: AudioSegment[]): void {
 /** Rebuild an untrusted saved project from explicitly validated fields. Throws on invalid data. */
 export function parseProject(value: unknown): MixProject {
   const input = object(value, "Project");
-  if (input.version !== 1)
-    throw new Error("This project version is not supported.");
+  if (input.version !== 1) {
+    if (
+      typeof input.version === "number" &&
+      Number.isFinite(input.version) &&
+      input.version > 0
+    )
+      throw new UnsupportedAudioSchemaError(
+        "This project version is not supported.",
+      );
+    throw new Error("The project version is invalid.");
+  }
   const tracks = array(input.tracks, "Project tracks", MAX_TRACKS).map(
     (track, index) => parseTrack(track, `Track ${index + 1}`),
   );
@@ -690,11 +985,16 @@ export function parseProject(value: unknown): MixProject {
     if (!segmentIds.length)
       throw new Error("A sentence must contain at least one audio segment.");
     unique(segmentIds, "Sentence segment IDs");
+    const speed =
+      group.speed === undefined ? 1 : number(group.speed, "Sentence speed");
+    if (!sentenceSpeeds.includes(speed as (typeof sentenceSpeeds)[number]))
+      throw new Error("Sentence speed must be 0.5×–2.5× in 0.25× steps.");
     return {
       id: string(group.id, "Sentence ID", 200),
       text: string(group.text, "Sentence text", 20_000),
       note: string(group.note, "Sentence note", 8_000, true),
       segmentIds,
+      speed,
     };
   });
   unique(
@@ -702,7 +1002,7 @@ export function parseProject(value: unknown): MixProject {
     "Sentences",
   );
   const groupMap = new Map(groups.map((group) => [group.id, group]));
-  const segments: AudioSegment[] = array(
+  let segments: AudioSegment[] = array(
     input.segments,
     "Project segments",
     MAX_SEGMENTS,
@@ -746,15 +1046,66 @@ export function parseProject(value: unknown): MixProject {
   if (referenced.size !== segments.length)
     throw new Error("Some audio segments are not assigned to a sentence.");
   ensureNoOverlap(segments);
+  if (input.audioSchema !== undefined && input.audioSchema !== 2) {
+    if (
+      typeof input.audioSchema === "number" &&
+      Number.isFinite(input.audioSchema) &&
+      input.audioSchema > 0
+    )
+      throw new UnsupportedAudioSchemaError();
+    throw new Error("The project audio editing schema is invalid.");
+  }
+  if (input.audioSchema === undefined)
+    segments = migrateLegacyBoundaries(tracks, segments);
+  ensureNoOverlap(segments);
   const model = input.model;
   if (
     typeof model !== "string" ||
     !transcriptionModels.includes(model as MixProject["model"])
   )
     throw new Error("The selected transcription model is not supported.");
-  const joinFadeMs = number(input.joinFadeMs, "Join fade");
+  const joinFadeMs =
+    input.joinFadeMs === undefined ? 0 : number(input.joinFadeMs, "Join fade");
   if (joinFadeMs < 0 || joinFadeMs > 100)
     throw new Error("Join fade must be between 0 and 100 milliseconds.");
+  const jointDefaults =
+    input.jointDefaults === undefined
+      ? { ...DEFAULT_JOINT_SETTINGS }
+      : (checkedJoint(input.jointDefaults) as JointSettings);
+  const jointOverrides: Record<string, Partial<JointSettings>> = {};
+  if (input.jointOverrides !== undefined) {
+    const overrides = object(input.jointOverrides, "Joint overrides");
+    if (Object.keys(overrides).length > MAX_GROUPS * 2)
+      throw new Error("The project contains too many joint overrides.");
+    for (const [key, value] of Object.entries(overrides)) {
+      let pair: unknown;
+      try {
+        pair = JSON.parse(key);
+      } catch {
+        throw new Error("A joint override has an invalid sentence pair.");
+      }
+      if (
+        !Array.isArray(pair) ||
+        pair.length !== 2 ||
+        pair[0] === pair[1] ||
+        pair.some((id) => typeof id !== "string" || !groupMap.has(id)) ||
+        key !== jointKey(pair[0], pair[1])
+      )
+        throw new Error("A joint override refers to an invalid sentence pair.");
+      jointOverrides[key] = checkedJoint(value, true);
+    }
+  }
+  let codex = { ...DEFAULT_CODEX_SELECTION };
+  if (input.codex !== undefined) {
+    const choice = object(input.codex, "Codex selection");
+    if (typeof choice.fast !== "boolean")
+      throw new Error("Codex Fast mode must be a boolean.");
+    codex = {
+      model: string(choice.model, "Codex model", 200, true),
+      reasoning: string(choice.reasoning, "Codex reasoning effort", 200, true),
+      fast: choice.fast,
+    };
+  }
   const updatedAt = string(input.updatedAt, "Project save date", 100);
   if (!Number.isFinite(Date.parse(updatedAt)))
     throw new Error("Project save date is invalid.");
@@ -766,7 +1117,11 @@ export function parseProject(value: unknown): MixProject {
     groups,
     segments,
     model: model as MixProject["model"],
-    joinFadeMs,
+    joinFadeMs: 0,
+    audioSchema: 2,
+    jointDefaults,
+    jointOverrides,
+    codex,
     updatedAt,
   };
 }

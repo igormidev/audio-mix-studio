@@ -5,11 +5,14 @@ import {
   newProject,
   splitSegment,
   trimSegment,
+  setGroupSpeed,
+  setJointDefaults,
 } from "../src/domain/project";
 import type { MixProject } from "../src/shared/types";
 import {
   deinterleavePCM,
   edgeFadeSeconds,
+  chunkGainEnvelope,
   PCM_SAMPLE_RATE,
   planPlayback,
 } from "../src/ui/playback";
@@ -105,7 +108,12 @@ const frames = new Map<number, FrameRequestCallback>();
 let frameId = 0;
 const audioSlice =
   vi.fn<
-    (trackId: string, start: number, end: number) => Promise<ArrayBuffer>
+    (
+      trackId: string,
+      start: number,
+      end: number,
+      speed?: number,
+    ) => Promise<ArrayBuffer>
   >();
 function pcm(seconds: number): ArrayBuffer {
   return new ArrayBuffer(Math.round(seconds * PCM_SAMPLE_RATE) * 8);
@@ -157,8 +165,8 @@ beforeEach(() => {
   frames.clear();
   frameId = 0;
   audioSlice.mockReset();
-  audioSlice.mockImplementation((_track, start, end) =>
-    Promise.resolve(pcm(end - start)),
+  audioSlice.mockImplementation((_track, start, end, speed = 1) =>
+    Promise.resolve(pcm((end - start) / speed)),
   );
   vi.stubGlobal("AudioContext", TestContext);
   vi.stubGlobal("window", { studio: { audioSlice } });
@@ -175,6 +183,71 @@ afterEach(() => {
 });
 
 describe("precise playback planning", () => {
+  it("keeps output-frame totals exact for every supported speed across long chunks", () => {
+    for (const speed of [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5]) {
+      const chunks = planPlayback([
+        {
+          id: "long",
+          trackId: "a",
+          start: 1,
+          end: 134.000125,
+          offset: 0,
+          speed,
+        },
+      ]);
+      const frames = chunks.reduce(
+        (total, chunk) => total + Math.round(chunk.duration * PCM_SAMPLE_RATE),
+        0,
+      );
+      expect(frames).toBe(
+        Math.round(Math.round(133.000125 * PCM_SAMPLE_RATE) / speed),
+      );
+      expect(
+        chunks.every(
+          (chunk) => chunk.end - chunk.start <= 60 + 1 / PCM_SAMPLE_RATE,
+        ),
+      ).toBe(true);
+      expect(
+        chunks.every((chunk) => chunk.duration <= 60 + 1 / PCM_SAMPLE_RATE),
+      ).toBe(true);
+    }
+  });
+  it("represents real joint pauses and seeks inside them without requesting fake source audio", () => {
+    const chunks = planPlayback(
+      [
+        { id: "first", trackId: "a", start: 0, end: 2, offset: 0, speed: 2 },
+        { id: "next", trackId: "b", start: 4, end: 6, offset: 1.5, speed: 0.5 },
+      ],
+      1.25,
+    );
+    expect(
+      chunks.map((chunk) => [
+        Boolean(chunk.silent),
+        chunk.offset,
+        chunk.duration,
+      ]),
+    ).toEqual([
+      [true, 1.25, 0.25],
+      [false, 1.5, 4],
+    ]);
+  });
+  it("continues a long fade across a decoder chunk boundary without restarting gain", () => {
+    const chunks = planPlayback([
+      {
+        id: "fade",
+        trackId: "a",
+        start: 0,
+        end: 62,
+        offset: 0,
+        fadeOutMs: 5000,
+      },
+    ]);
+    const preceding = chunkGainEnvelope(chunks[0]);
+    const last = chunkGainEnvelope(chunks[1]);
+    expect(preceding[preceding.length - 1].value).toBeCloseTo(0.4);
+    expect(last[0].value).toBeCloseTo(0.4);
+    expect(last[last.length - 1]).toEqual({ time: 2, value: 0 });
+  });
   it("chunks long sources at exact samples and fades only the logical clip edges", () => {
     const chunks = planPlayback([
       { id: "clip", trackId: "a", start: 1, end: 134, offset: 0 },
@@ -231,6 +304,65 @@ describe("precise playback planning", () => {
 });
 
 describe("Web Audio playback scheduling", () => {
+  it("uses pitch-preserving sentence speed and schedules the joint pause exactly once", async () => {
+    const original = source();
+    let p = splitSegment(original, original.segments[0].id, 6);
+    // Give the second half its own sentence so the joint has independent settings.
+    const tail = p.segments[1];
+    p = {
+      ...p,
+      groups: [
+        { ...p.groups[0], segmentIds: [p.segments[0].id] },
+        {
+          id: "second",
+          text: "Second",
+          note: "",
+          segmentIds: [tail.id],
+          speed: 1,
+        },
+      ],
+      segments: p.segments.map((segment) =>
+        segment.id === tail.id ? { ...segment, groupId: "second" } : segment,
+      ),
+    };
+    p = setGroupSpeed(p, p.groups[0].id, 2);
+    p = setGroupSpeed(p, "second", 0.5);
+    p = setJointDefaults(p, { pauseMs: 500, fadeOutMs: 200, fadeInMs: 300 });
+    const test = runner(p);
+    test.render().playMaster();
+    await settle();
+    const context = TestContext.instances[0];
+    expect(audioSlice).toHaveBeenCalledWith("a", 0, 6, 2);
+    expect(audioSlice).toHaveBeenCalledWith("a", 6, 12, 0.5);
+    expect(context.sources[0].start).toHaveBeenCalledWith(0.035, 0, 3);
+    expect(context.sources[1].start).toHaveBeenCalledWith(3.035, 0, 0.5);
+    context.currentTime = 3.035;
+    context.sources[0].finish();
+    await settle();
+    expect(context.sources[2].start).toHaveBeenCalledWith(3.535, 0, 12);
+    expect(context.gains[0].gain.linearRampToValueAtTime).toHaveBeenCalledWith(
+      0,
+      3.035,
+    );
+    expect(context.gains[2].gain.linearRampToValueAtTime).toHaveBeenCalledWith(
+      1,
+      3.835,
+    );
+  });
+  it("applies sentence speed to sentence previews while full-source previews remain 1×", async () => {
+    let p = source();
+    p = setGroupSpeed(p, p.groups[0].id, 2.5);
+    const test = runner(p);
+    test.render().preview(p.segments[0]);
+    await settle();
+    expect(audioSlice).toHaveBeenLastCalledWith("a", 0, 12, 2.5);
+    test.render().stop();
+    test
+      .render()
+      .preview({ ...p.segments[0], id: "source-preview", groupId: "" });
+    await settle();
+    expect(audioSlice).toHaveBeenLastCalledWith("a", 0, 12, 1);
+  });
   it("previews exact trimmed source ranges and leaves the master cursor alone", async () => {
     const original = source();
     const p = trimSegment(original, original.segments[0].id, 2, 4);
@@ -239,11 +371,11 @@ describe("Web Audio playback scheduling", () => {
     test.render().preview(p.segments[0]);
     await settle();
     const context = TestContext.instances[0];
-    expect(audioSlice).toHaveBeenCalledWith("a", 2, 4);
+    expect(audioSlice).toHaveBeenCalledWith("a", 2, 4, 1);
     expect(context.sources[0].start).toHaveBeenCalledWith(0.035, 0, 2);
     expect(context.gains[0].gain.linearRampToValueAtTime).toHaveBeenCalledWith(
       1,
-      0.043000000000000003,
+      2.035,
     );
     expect(test.render().position).toBe(0.7);
     context.sources[0].finish();
@@ -261,8 +393,8 @@ describe("Web Audio playback scheduling", () => {
     await settle();
     const context = TestContext.instances[0];
     expect(audioSlice.mock.calls).toEqual([
-      ["a", 1, 3],
-      ["a", 7, 10],
+      ["a", 1, 3, 1],
+      ["a", 7, 10, 1],
     ]);
     expect(context.sources[0].start).toHaveBeenCalledWith(0.035, 0, 2);
     expect(context.sources[1].start).toHaveBeenCalledWith(2.035, 0, 3);
@@ -280,7 +412,7 @@ describe("Web Audio playback scheduling", () => {
     test.render().previewMany(p.segments);
     await settle();
     const context = TestContext.instances[0];
-    expect(audioSlice).toHaveBeenCalledWith("a", 5, 12);
+    expect(audioSlice).toHaveBeenCalledWith("a", 5, 12, 1);
     expect(context.sources).toHaveLength(1);
     expect(context.sources[0].start).toHaveBeenCalledWith(0.035, 0, 5);
     expect(test.render().preparing).toBe(false);
@@ -320,7 +452,7 @@ describe("Web Audio playback scheduling", () => {
     test.render().playMaster(2.5);
     await settle();
     const context = TestContext.instances[0];
-    expect(audioSlice).toHaveBeenCalledWith("a", 7.5, 10);
+    expect(audioSlice).toHaveBeenCalledWith("a", 7.5, 10, 1);
     context.currentTime = 0.535;
     tick();
     expect(test.render().position).toBeCloseTo(3);
@@ -396,7 +528,7 @@ describe("Web Audio playback scheduling", () => {
     expect(test.render().position).toBeCloseTo(0.515);
     test.render().playMaster();
     await settle();
-    expect(audioSlice).toHaveBeenLastCalledWith("a", 0.515, 12);
+    expect(audioSlice).toHaveBeenLastCalledWith("a", 0.515, 12, 1);
   });
   it("reports current decode errors and suppresses stale failures after stopping", async () => {
     const p = source();
@@ -432,7 +564,7 @@ describe("Web Audio playback scheduling", () => {
     await vi.advanceTimersByTimeAsync(100);
     await settle();
     expect(audioSlice).toHaveBeenCalledTimes(1);
-    expect(audioSlice).toHaveBeenCalledWith("a", 3, 12);
+    expect(audioSlice).toHaveBeenCalledWith("a", 3, 12, 1);
   });
   it("buffers a slow lookahead without skipping the next section", async () => {
     const original = source();

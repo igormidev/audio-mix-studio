@@ -3,6 +3,7 @@ import type { AudioTrack } from "../../src/shared/types";
 import {
   alignmentInputs,
   codexArguments,
+  codexTranscriptInput,
   validateAlignment,
 } from "./alignment";
 
@@ -28,6 +29,26 @@ function track(id: string, text: string[]): AudioTrack {
 }
 
 describe("structured transcript alignment", () => {
+  it("supplies explicit word indices while keeping source paths and audio metadata out of the prompt", () => {
+    const source = track("opaque-id", ["First", "sentence.", "Second."]);
+    source.name = "personal-source.wav";
+    source.mediaUrl = "/private/personal-source.wav";
+    const text = codexTranscriptInput(alignmentInputs([source]));
+    expect(JSON.parse(text)).toEqual([
+      {
+        trackId: "opaque-id",
+        granularity: "word",
+        units: [
+          [0, "First"],
+          [1, "sentence."],
+          [2, "Second."],
+        ],
+      },
+    ]);
+    expect(text).not.toContain("personal-source");
+    expect(text).not.toContain("duration");
+  });
+
   it("keeps quoted transcript analysis isolated from local execution, accounts, hooks and memory", () => {
     const args = codexArguments(
       "/private/work",

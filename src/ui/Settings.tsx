@@ -1,5 +1,6 @@
 import {
   Check,
+  CircleHelp,
   Download,
   ExternalLink,
   LoaderCircle,
@@ -11,11 +12,14 @@ import {
 } from "lucide-react";
 import type {
   DependencyStatus,
+  JointSettings,
+  CodexSelection,
   MixProject,
   StudioTheme,
   TranscriptionModel,
 } from "../shared/types";
 import { transcriptionModels } from "../shared/types";
+import { CodexSettings } from "./CodexSettings";
 export function Settings({
   project,
   status,
@@ -25,7 +29,9 @@ export function Settings({
   onClose,
   onCancel,
   onChangeModel,
-  onFade,
+  onJointDefaults,
+  onCodexChange,
+  onGuide,
   onSetup,
   onRefresh,
   onExportJSON,
@@ -38,7 +44,9 @@ export function Settings({
   onClose: () => void;
   onCancel?: () => void;
   onChangeModel: (model: TranscriptionModel) => void;
-  onFade: (n: number) => void;
+  onJointDefaults: (update: Partial<JointSettings>) => void;
+  onCodexChange: (value: CodexSelection) => void;
+  onGuide: () => void;
   onSetup: () => void;
   onRefresh: () => void;
   onExportJSON: () => void;
@@ -138,6 +146,11 @@ export function Settings({
             Prepare model
           </button>
         </div>
+        <CodexSettings
+          value={project.codex}
+          disabled={busy}
+          onChange={onCodexChange}
+        />
         <div className="setting-section">
           <div className="section-heading">
             <h3>Local tools</h3>
@@ -182,26 +195,44 @@ export function Settings({
           </p>
         </div>
         <div className="setting-section">
-          <h3>Joins</h3>
-          <label className="fade-setting">
-            Fade each clip edge
-            <span>
-              <input
-                aria-label="Clip edge fade milliseconds"
-                type="number"
-                min="0"
-                max="20"
-                step="1"
-                disabled={busy}
-                value={project.joinFadeMs}
-                onChange={(e) =>
-                  onFade(Math.max(0, Math.min(20, Number(e.target.value))))
-                }
-              />{" "}
-              ms
-            </span>
-          </label>
-          <p>Reduces clicks without changing the mix duration.</p>
+          <h3>Joints</h3>
+          {(
+            [
+              ["fadeInMs", "Default fade-in clip edge", 5000],
+              ["fadeOutMs", "Default fade-out clip edge", 5000],
+              ["pauseMs", "Default pause", 10000],
+            ] as const
+          ).map(([key, label, max]) => (
+            <label className="fade-setting" key={key}>
+              {label}
+              <span>
+                <input
+                  aria-label={label + " milliseconds"}
+                  type="number"
+                  min={0}
+                  max={max}
+                  step={10}
+                  disabled={busy}
+                  value={project.jointDefaults?.[key] ?? 0}
+                  onChange={(event) =>
+                    onJointDefaults({
+                      [key]: Math.max(
+                        0,
+                        Math.min(max, Number(event.target.value)),
+                      ),
+                    })
+                  }
+                />{" "}
+                ms
+              </span>
+            </label>
+          ))}
+        </div>
+        <div className="setting-section guide-setting">
+          <button className="text-button" disabled={busy} onClick={onGuide}>
+            <CircleHelp size={15} />
+            Quick guide
+          </button>
         </div>
         <footer>
           <button

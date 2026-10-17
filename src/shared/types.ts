@@ -41,6 +41,29 @@ export interface SentenceGroup {
   text: string;
   note: string;
   segmentIds: string[];
+  speed?: number;
+}
+export interface JointSettings {
+  pauseMs: number;
+  fadeOutMs: number;
+  fadeInMs: number;
+}
+export interface CodexModelInfo {
+  id: string;
+  name: string;
+  description: string;
+  reasoning: string[];
+  defaultReasoning: string;
+  isDefault: boolean;
+  fast: boolean;
+}
+export interface CodexSelection {
+  model: string;
+  reasoning: string;
+  fast: boolean;
+}
+export interface StudioPreferences {
+  hasExportedMaster: boolean;
 }
 export interface MixProject {
   version: 1;
@@ -51,6 +74,10 @@ export interface MixProject {
   segments: AudioSegment[];
   model: TranscriptionModel;
   joinFadeMs: number;
+  audioSchema?: 2;
+  jointDefaults?: JointSettings;
+  jointOverrides?: Record<string, Partial<JointSettings>>;
+  codex?: CodexSelection;
   updatedAt: string;
 }
 export type StudioTheme = "light" | "dark" | "system";
@@ -64,6 +91,11 @@ export interface WorkspaceSession {
 export interface MasterClip extends AudioSegment {
   offset: number;
   duration: number;
+  sourceDuration?: number;
+  speed?: number;
+  pauseBeforeMs?: number;
+  fadeInMs?: number;
+  fadeOutMs?: number;
 }
 export interface AnalysisGroup {
   text: string;
@@ -94,13 +126,20 @@ export interface OperationProgress {
   trackId?: string;
 }
 export interface StudioAPI {
+  preferences(): Promise<StudioPreferences>;
+  codexModels(): Promise<CodexModelInfo[]>;
   restoreWorkspace(): Promise<WorkspaceSession | null>;
   autosaveWorkspace(session: WorkspaceSession): Promise<void>;
   setTheme(theme: StudioTheme): Promise<void>;
   dependencies(): Promise<DependencyStatus>;
   importAudio(projectId?: string): Promise<AudioTrack[]>;
   importPaths(paths: string[], projectId?: string): Promise<AudioTrack[]>;
-  audioSlice(trackId: string, start: number, end: number): Promise<ArrayBuffer>;
+  audioSlice(
+    trackId: string,
+    start: number,
+    end: number,
+    speed?: number,
+  ): Promise<ArrayBuffer>;
   pathForFile(file: File): string;
   analyze(project: MixProject): Promise<MixProject>;
   setupTranscription(

@@ -7,15 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  AudioLines,
-  LoaderCircle,
-  Moon,
-  Plus,
-  RotateCcw,
-  Sun,
-  X,
-} from "lucide-react";
+import { AudioLines, LoaderCircle, Moon, Plus, Sun, X } from "lucide-react";
 import { newProject } from "../domain/project";
 import type { MixProject, StudioTheme } from "../shared/types";
 import type { EditorAction } from "./editor";
@@ -32,9 +24,8 @@ export function App() {
   );
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
-  const [autosaveState, setAutosaveState] = useState<
-    "saving" | "saved" | "error"
-  >("saved");
+  const [hasExportedMaster, setHasExportedMaster] = useState(true);
+  const [demoRequest, setDemoRequest] = useState({ id: "", nonce: 0 });
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [systemDark, setSystemDark] = useState(
     () => matchMedia("(prefers-color-scheme: dark)").matches,
@@ -48,6 +39,14 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    void window.studio
+      .preferences()
+      .then((preferences) => {
+        if (active) setHasExportedMaster(preferences.hasExportedMaster);
+      })
+      .catch((e) => {
+        if (active) setError(`Could not read settings: ${String(e)}`);
+      });
     void window.studio
       .restoreWorkspace()
       .then((session) => {
@@ -77,20 +76,13 @@ export function App() {
   useEffect(() => {
     if (!ready) return;
     let active = true;
-    setAutosaveState("saving");
-    void window.studio
-      .autosaveWorkspace(workspaceSession(state))
-      .then(() => {
-        if (active) setAutosaveState("saved");
-      })
-      .catch((e) => {
-        if (active) {
-          setAutosaveState("error");
-          setError(
-            `Could not save tabs: ${e instanceof Error ? e.message : String(e)}`,
-          );
-        }
-      });
+    void window.studio.autosaveWorkspace(workspaceSession(state)).catch((e) => {
+      if (active) {
+        setError(
+          `Could not save tabs: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    });
     return () => {
       active = false;
     };
@@ -113,12 +105,41 @@ export function App() {
   const onBusyChange = useCallback((id: string, working: boolean) => {
     busyRef.current = { ...busyRef.current, [id]: working };
     setBusy(busyRef.current);
+    if (!working)
+      setDemoRequest((previous) =>
+        previous.id === id ? { ...previous, id: "" } : previous,
+      );
   }, []);
   const onEdit = useCallback(
     (id: string, action: EditorAction) =>
       dispatch({ type: "editor", id, action }),
     [],
   );
+  const onExported = useCallback(() => setHasExportedMaster(true), []);
+  const onRequestDemo = useCallback(() => {
+    const current = stateRef.current;
+    const activeEditor = current.editors.find(
+      (e) => e.project.id === current.activeId,
+    );
+    const empty =
+      activeEditor &&
+      !activeEditor.project.tracks.length &&
+      !busyRef.current[activeEditor.project.id]
+        ? activeEditor
+        : current.editors.find(
+            (e) => !e.project.tracks.length && !busyRef.current[e.project.id],
+          );
+    if (!empty && current.editors.length >= 50) {
+      setError("Close a tab before opening the sample (50 maximum).");
+      return;
+    }
+    const project = empty?.project ?? newProject();
+    dispatch({ type: "add", project });
+    setDemoRequest((previous) => ({
+      id: project.id,
+      nonce: previous.nonce + 1,
+    }));
+  }, []);
   const close = useCallback((id: string) => {
     if (busyRef.current[id]) return;
     dispatch({ type: "close", id, replacement: newProject() });
@@ -215,15 +236,6 @@ export function App() {
           <Plus size={17} />
         </button>
         <button
-          className="icon-button studio-reopen-tab"
-          aria-label="Reopen closed tab"
-          title="Reopen closed tab · ⇧⌘T"
-          disabled={!ready || !state.closed.length}
-          onClick={() => dispatch({ type: "reopen" })}
-        >
-          <RotateCcw size={15} />
-        </button>
-        <button
           className="studio-theme-toggle icon-button"
           aria-label={
             resolvedTheme === "dark" ? "Use light mode" : "Use dark mode"
@@ -261,7 +273,12 @@ export function App() {
               onOpenProject={onOpenProject}
               onBusyChange={onBusyChange}
               onEdit={onEdit}
-              autosaveState={autosaveState}
+              showQuickGuide={!hasExportedMaster}
+              onExported={onExported}
+              onRequestDemo={onRequestDemo}
+              demoRequest={
+                demoRequest.id === editor.project.id ? demoRequest.nonce : 0
+              }
             />
           ))
         ) : (
