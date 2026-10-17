@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -95,6 +95,28 @@ describe("real FFmpeg media pipeline", () => {
   afterAll(async () => {
     await rm(directory, { recursive: true, force: true });
   });
+  const packetCleanups: (() => Promise<void>)[] = [];
+  afterEach(async () => {
+    while (packetCleanups.length) await packetCleanups.pop()!();
+  });
+  async function useWavPacketSize(size: number): Promise<void> {
+    const binaries = await mkdtemp(path.join(directory, "wav-packets-"));
+    // FFmpeg 6 defaults to small WAV packets; newer builds may choose larger
+    // packets and hide atempo's sensitivity to seek-vs-atrim AVFrame boundaries.
+    // Exercise both production paths under the older framing on every platform.
+    await writeFile(
+      path.join(binaries, "ffmpeg"),
+      `#!/usr/bin/env node\nconst { spawnSync } = require('node:child_process');\nconst result = spawnSync(${JSON.stringify(ffmpeg)}, ['-max_size', ${JSON.stringify(String(size))}, ...process.argv.slice(2)], { stdio: 'inherit' });\nif (result.error) { console.error(result.error.message); process.exit(1); }\nprocess.exit(result.status ?? 1);\n`,
+      { mode: 0o700 },
+    );
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${binaries}${path.delimiter}${previousPath ?? ""}`;
+    packetCleanups.push(async () => {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      await rm(binaries, { recursive: true, force: true });
+    });
+  }
   it("copies immutable normalized audio, persists source IDs, and renders chosen segments in order", async () => {
     const original = await readFile(source);
     const track = await store.importAudio(source);
@@ -295,6 +317,7 @@ describe("real FFmpeg media pipeline", () => {
     expect(after.stdout.byteLength).toBe(2 * 48000 * 2 * 3);
   });
   it("renders pitch-preserving sentence speed and exact joint pauses consistently with preview PCM", async () => {
+    await useWavPacketSize(4096);
     const track = await store.importAudio(source);
     let p = applyAlignment(appendTracks(newProject(), [track]), {
       groups: [

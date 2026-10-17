@@ -474,7 +474,13 @@ function validatePlaybackSpeed(speed: number): void {
 /** Chain atempo above 2× to retain speech pitch without skipped analysis windows. */
 function tempoFilters(speed: number): string[] {
   if (speed === 1) return [];
-  return speed > 2 ? ["atempo=2", `atempo=${speed / 2}`] : [`atempo=${speed}`];
+  // Input seeking and full-source atrim can produce different AVFrame sizes.
+  // atempo's WSOLA overlap decisions are frame-sensitive in some FFmpeg builds;
+  // reframe both paths identically without padding or dropping source samples.
+  return [
+    "asetnsamples=n=1024:p=0",
+    ...(speed > 2 ? ["atempo=2", `atempo=${speed / 2}`] : [`atempo=${speed}`]),
+  ];
 }
 
 function clipFades(
