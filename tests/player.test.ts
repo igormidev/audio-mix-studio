@@ -401,6 +401,75 @@ describe("Web Audio playback scheduling", () => {
     context.currentTime = 20;
     expect(context.sources).toHaveLength(2); // Audio source scheduling is independent of RAF.
   });
+  it("omits cut pieces from sentence previews and keeps the original row identity for stop", async () => {
+    const original = source();
+    let p = splitSegment(original, original.segments[0].id, 2);
+    p = splitSegment(p, p.segments[1].id, 5);
+    p = splitSegment(p, p.segments[2].id, 7);
+    p = setGroupSpeed(p, p.groups[0].id, 1.25);
+    p = {
+      ...p,
+      segments: p.segments.map((segment, index) => ({
+        ...segment,
+        excluded: index === 0 || index === 2,
+      })),
+    };
+    const test = runner(p);
+    test.render().previewMany(p.segments);
+    await settle();
+    const context = TestContext.instances[0];
+    expect(audioSlice.mock.calls).toEqual([
+      ["a", 2, 5, 1.25],
+      ["a", 7, 12, 1.25],
+    ]);
+    expect(context.sources[0].start).toHaveBeenCalledWith(0.035, 0, 2.4);
+    expect(context.sources[1].start).toHaveBeenCalledWith(2.435, 0, 4);
+    expect(test.render().previewId).toBe(p.segments[0].id);
+    test.render().previewMany(p.segments);
+    expect(test.render().playing).toBe(false);
+    expect(context.sources.every((node) => node.stop.mock.calls.length)).toBe(
+      true,
+    );
+    expect(audioSlice).toHaveBeenCalledTimes(2);
+    expect(test.errors).not.toHaveBeenCalled();
+  });
+  it("stops an existing preview without decoding or errors when every sentence piece is cut", async () => {
+    const p = source();
+    const test = runner(p);
+    test.render().preview(p.segments[0]);
+    await settle();
+    const context = TestContext.instances[0];
+    test
+      .render()
+      .previewMany([
+        { ...p.segments[0], id: "fully-excluded", excluded: true },
+      ]);
+    expect(test.render().playing).toBe(false);
+    expect(test.render().previewId).toBeNull();
+    expect(context.sources[0].stop).toHaveBeenCalled();
+    expect(audioSlice).toHaveBeenCalledTimes(1);
+    expect(test.errors).not.toHaveBeenCalled();
+  });
+  it("omits sub-output-frame remnants at fast speeds without losing preview identity", async () => {
+    const original = source();
+    const p = setGroupSpeed(original, original.groups[0].id, 2.5);
+    const tiny = { ...p.segments[0], id: "tiny", start: 0, end: 1 / 48000 };
+    const retained = { ...p.segments[0], id: "retained", start: 1, end: 2 };
+    const test = runner(p);
+    test.render().previewMany([tiny, retained]);
+    await settle();
+    expect(audioSlice.mock.calls).toEqual([["a", 1, 2, 2.5]]);
+    expect(test.render().previewId).toBe("tiny");
+    expect(TestContext.instances[0].sources[0].start).toHaveBeenCalledWith(
+      0.035,
+      0,
+      0.4,
+    );
+    test.render().previewMany([{ ...tiny, id: "another-tiny" }]);
+    expect(test.render().playing).toBe(false);
+    expect(audioSlice).toHaveBeenCalledTimes(1);
+    expect(test.errors).not.toHaveBeenCalled();
+  });
   it("starts the first decoded section while a slower second section prepares", async () => {
     const original = source();
     const p = splitSegment(original, original.segments[0].id, 5);

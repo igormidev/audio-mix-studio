@@ -22,6 +22,7 @@ import {
   Play,
   Plus,
   Minus,
+  MousePointer2,
   Redo2,
   Scissors,
   Search,
@@ -51,6 +52,8 @@ import {
   chooseVariation,
   masterClips,
   masterDuration,
+  excludeMasterRange,
+  restoreMasterSegment,
   moveGroup,
   removeTrack,
   splitSegment,
@@ -116,6 +119,8 @@ export const Workspace = memo(function Workspace({
   const [dropTarget, setDropTarget] = useState<AudioDropTarget | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [cutTool, setCutTool] = useState(false);
+  const [masterTool, setMasterTool] = useState<"seek" | "cut">("seek");
+  const editorViewport = useRef<HTMLElement>(null);
   const [zoom, setZoom] = useState(1);
   const busy = working;
   const operation = useRef(false);
@@ -125,6 +130,44 @@ export const Workspace = memo(function Workspace({
   const playerStop = player.stop;
   const isPlaying = player.playing;
   const playMaster = player.playMaster;
+  const playingGroupId =
+    active && player.playing && !player.previewId
+      ? (clips.find(
+          (clip) =>
+            player.position >= clip.offset &&
+            player.position < clip.offset + clip.duration,
+        )?.groupId ?? null)
+      : null;
+  useEffect(() => {
+    if (
+      !playingGroupId ||
+      !active ||
+      tab !== "choices" ||
+      query ||
+      settings ||
+      help ||
+      confirmAlign
+    )
+      return;
+    const viewport = editorViewport.current;
+    if (!viewport) return;
+    // Scroll only the sentence list. The master and sidebar stay in place.
+    const row = Array.from(
+      viewport.querySelectorAll<HTMLElement>("[data-sentence-drop]"),
+    ).find((element) => element.dataset.sentenceDrop === playingGroupId);
+    if (!row) return;
+    const top =
+      viewport.scrollTop +
+      row.getBoundingClientRect().top -
+      viewport.getBoundingClientRect().top -
+      12;
+    viewport.scrollTo({
+      top: Math.max(0, top),
+      behavior: matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth",
+    });
+  }, [playingGroupId, active, tab, query, settings, help, confirmAlign]);
   const busyRef = useRef(busy);
   busyRef.current = busy;
   const projectRef = useRef(project);
@@ -350,7 +393,7 @@ export const Workspace = memo(function Workspace({
       if (action === "open") open();
       if (
         action === "export" &&
-        projectRef.current.segments.some((s) => s.enabled)
+        projectRef.current.segments.some((s) => s.enabled && !s.excluded)
       )
         exportAudio("wav");
     };
@@ -465,6 +508,15 @@ export const Workspace = memo(function Workspace({
       edit((p) => moveGroup(p, groupId, direction)),
     [edit],
   );
+  const cutMaster = useCallback(
+    (start: number, end: number) =>
+      edit((p) => excludeMasterRange(p, start, end)),
+    [edit],
+  );
+  const restoreMaster = useCallback(
+    (segmentId: string) => edit((p) => restoreMasterSegment(p, segmentId)),
+    [edit],
+  );
   const toggle = useCallback(
     (id: string) => edit((p) => toggleSegment(p, id)),
     [edit],
@@ -474,9 +526,7 @@ export const Workspace = memo(function Workspace({
     [edit],
   );
   const precedingAudibleGroup = useMemo(() => {
-    const audible = new Set(
-      project.segments.filter((s) => s.enabled).map((s) => s.groupId),
-    );
+    const audible = new Set(clips.map((clip) => clip.groupId));
     const result = new Map<string, SentenceGroup>();
     let previous: SentenceGroup | undefined;
     for (const group of project.groups) {
@@ -485,7 +535,7 @@ export const Workspace = memo(function Workspace({
       previous = group;
     }
     return result;
-  }, [project]);
+  }, [clips, project.groups]);
   const changeSpeed = useCallback(
     (groupId: string, speed: number) =>
       edit((p) => setGroupSpeed(p, groupId, speed)),
@@ -701,6 +751,35 @@ export const Workspace = memo(function Workspace({
                 <AudioLines size={16} />
               </span>
               <h2>Master track</h2>
+              <div
+                className="master-tools"
+                role="group"
+                aria-label="Master track tools"
+              >
+                <button
+                  className="master-tool"
+                  aria-label="Seek on master track"
+                  aria-pressed={masterTool === "seek"}
+                  title="Seek · click to jump"
+                  disabled={busy || !project.groups.length}
+                  onClick={() => setMasterTool("seek")}
+                >
+                  <MousePointer2 size={14} />
+                </button>
+                <button
+                  className="master-tool"
+                  aria-label="Cut audio on master track"
+                  aria-pressed={masterTool === "cut"}
+                  title="Cut · drag to exclude audio"
+                  disabled={busy || !project.groups.length}
+                  onClick={() => {
+                    playerStop();
+                    setMasterTool("cut");
+                  }}
+                >
+                  <Scissors size={14} />
+                </button>
+              </div>
             </div>
             <span className="master-details">
               {clips.length} {clips.length === 1 ? "clip" : "clips"}
@@ -715,6 +794,11 @@ export const Workspace = memo(function Workspace({
             position={player.position}
             active={active}
             following={player.playing && !player.previewId}
+            mode={masterTool}
+            disabled={busy}
+            onCut={cutMaster}
+            onCutStart={playerStop}
+            onRestore={restoreMaster}
             onSeek={player.seek}
           />
           <div className="transport">
@@ -913,6 +997,7 @@ export const Workspace = memo(function Workspace({
         ) : (
           <section
             className="editor-content"
+            ref={editorViewport}
             id={
               tab === "choices"
                 ? `choices-panel-${project.id}`
@@ -976,6 +1061,7 @@ export const Workspace = memo(function Workspace({
                           index={index}
                           project={project}
                           disabled={busy}
+                          playing={playingGroupId === group.id}
                           previewId={player.previewId}
                           onPreview={player.previewMany}
                           onChoose={choose}
@@ -1265,6 +1351,7 @@ const SentenceRow = memo(function SentenceRow({
   onSpeed,
   onAddAudio,
   dropActive,
+  playing,
 }: {
   group: SentenceGroup;
   index: number;
@@ -1278,6 +1365,7 @@ const SentenceRow = memo(function SentenceRow({
   onSpeed: (groupId: string, speed: number) => void;
   onAddAudio: (groupId: string, paths?: string[]) => void;
   dropActive: boolean;
+  playing: boolean;
 }) {
   const segments = project.segments.filter((s) => s.groupId === group.id);
   const variations = project.tracks.flatMap((track) => {
@@ -1293,7 +1381,8 @@ const SentenceRow = memo(function SentenceRow({
   ).length;
   return (
     <article
-      className={`sentence-row ${skipped ? "skipped" : ""} ${dropActive ? "drop-active" : ""}`}
+      className={`sentence-row ${skipped ? "skipped" : ""} ${dropActive ? "drop-active" : ""} ${playing ? "is-playing" : ""}`}
+      aria-current={playing ? "true" : undefined}
       data-sentence-drop={group.id}
     >
       {dropActive && (
@@ -1410,7 +1499,7 @@ const SentenceRow = memo(function SentenceRow({
                 <div className="variation-wave">
                   <button
                     className={`preview-button ${isPlaying ? "playing" : ""}`}
-                    disabled={disabled}
+                    disabled={disabled || parts.every((part) => part.excluded)}
                     aria-label={`${isPlaying ? "Stop" : "Preview"} ${track.name}, sentence ${index + 1}`}
                     onClick={() => onPreview(parts)}
                   >
@@ -1429,7 +1518,8 @@ const SentenceRow = memo(function SentenceRow({
                   <span className="variation-time">
                     {secondsLabel(
                       parts.reduce(
-                        (total, part) => total + part.end - part.start,
+                        (total, part) =>
+                          total + (part.excluded ? 0 : part.end - part.start),
                         0,
                       ) / (group.speed ?? 1),
                     )}
@@ -1502,7 +1592,7 @@ const ManualTrack = memo(function ManualTrack({
         <Waveform peaks={track.peaks} color="#ced3d0" bars={220} />
         {segments.map((segment) => (
           <button
-            className={`source-segment ${segment.enabled ? "enabled" : "muted"} ${selected === segment.id ? "inspected" : ""}`}
+            className={`source-segment ${segment.enabled && !segment.excluded ? "enabled" : "muted"} ${selected === segment.id ? "inspected" : ""}`}
             style={
               {
                 left: `${(segment.start / track.duration) * 100}%`,
@@ -1512,8 +1602,8 @@ const ManualTrack = memo(function ManualTrack({
             }
             key={segment.id}
             disabled={disabled}
-            aria-label={`${segment.enabled ? "Mute" : "Include"} ${segment.text || "segment"} at ${clock(segment.start)}`}
-            aria-pressed={segment.enabled}
+            aria-label={`${segment.enabled && !segment.excluded ? "Mute" : "Include"} ${segment.text || "segment"} at ${clock(segment.start)}`}
+            aria-pressed={segment.enabled && !segment.excluded}
             onClick={(e) => {
               if (cutTool) {
                 const fraction =
@@ -1535,11 +1625,15 @@ const ManualTrack = memo(function ManualTrack({
             title={
               cutTool
                 ? "Click to split here"
-                : `${segment.enabled ? "In master · click to mute" : "Muted · click to include"} · Right-click for trim controls`
+                : `${segment.enabled && !segment.excluded ? "In master · click to mute" : "Muted · click to include"} · Right-click for trim controls`
             }
           >
             <span className="source-segment-text">
-              {segment.enabled ? <Volume2 size={11} /> : <VolumeX size={11} />}
+              {segment.enabled && !segment.excluded ? (
+                <Volume2 size={11} />
+              ) : (
+                <VolumeX size={11} />
+              )}
               <span>{segment.text || "Audio segment"}</span>
             </span>
             <Waveform
@@ -1623,7 +1717,7 @@ function SegmentInspector({
       <button
         className="icon-button"
         aria-label="Preview selected segment"
-        disabled={disabled}
+        disabled={disabled || segment.excluded}
         onClick={onPreview}
       >
         <Play size={15} />

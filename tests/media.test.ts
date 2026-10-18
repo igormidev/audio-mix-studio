@@ -19,6 +19,7 @@ import {
   newProject,
   setGroupSpeed,
   setJointDefaults,
+  excludeMasterRange,
 } from "../src/domain/project";
 
 describe("bounded media byte ranges", () => {
@@ -408,6 +409,128 @@ describe("real FFmpeg media pipeline", () => {
       faded,
     ]);
     expect(Number(fadedProbe.stdout.toString())).toBe(2.65);
+  });
+  it("removes a master range across sentence edges without inserting zeros or reordering retained samples", async () => {
+    const track = await store.importAudio(source);
+    let project = applyAlignment(appendTracks(newProject(), [track]), {
+      groups: [
+        {
+          text: "Low tone",
+          note: "",
+          variations: [
+            { trackId: track.id, start: 0, end: 1, text: "Low tone" },
+          ],
+        },
+        {
+          text: "High tone",
+          note: "",
+          variations: [
+            { trackId: track.id, start: 1, end: 2, text: "High tone" },
+          ],
+        },
+      ],
+    });
+    project = excludeMasterRange(project, 0.25, 1.25);
+    const clips = masterClips(project);
+    expect(clips.map((clip) => [clip.start, clip.end, clip.offset])).toEqual([
+      [0, 0.25, 0],
+      [1.25, 2, 0.25],
+    ]);
+    const output = path.join(directory, "master-cut-exact.wav");
+    await renderMaster(store, clips, output, "wav", 0);
+    const raw = (filename: string) =>
+      runProcess(ffmpeg, [
+        "-v",
+        "error",
+        "-i",
+        filename,
+        "-c:a",
+        "pcm_s24le",
+        "-f",
+        "s24le",
+        "-",
+      ]);
+    const [before, after] = await Promise.all([
+      raw(store.filename(track.id)),
+      raw(output),
+    ]);
+    const frameBytes = 2 * 3;
+    const expected = Buffer.concat([
+      before.stdout.subarray(0, 0.25 * 48000 * frameBytes),
+      before.stdout.subarray(1.25 * 48000 * frameBytes),
+    ]);
+    expect(after.stdout).toEqual(expected);
+    expect(after.stdout.byteLength).toBe(48000 * frameBytes);
+  });
+  it("agrees with preview ranges and time stretching after master cuts shorten two sentences", async () => {
+    await useWavPacketSize(4096);
+    const track = await store.importAudio(source);
+    let project = applyAlignment(appendTracks(newProject(), [track]), {
+      groups: [
+        {
+          text: "First tone",
+          note: "",
+          variations: [
+            { trackId: track.id, start: 0, end: 1, text: "First tone" },
+          ],
+        },
+        {
+          text: "Second tone",
+          note: "",
+          variations: [
+            { trackId: track.id, start: 1, end: 2, text: "Second tone" },
+          ],
+        },
+      ],
+    });
+    project = excludeMasterRange(project, 0.25, 1.25);
+    project = setGroupSpeed(project, project.groups[0].id, 1.25);
+    project = setGroupSpeed(project, project.groups[1].id, 0.75);
+    const clips = masterClips(project);
+    expect(masterDuration(project)).toBe(1.2);
+    const output = path.join(directory, "master-cut-speed.wav");
+    await renderMaster(store, clips, output, "wav", 0);
+    const exported = await runProcess(ffmpeg, [
+      "-v",
+      "error",
+      "-i",
+      output,
+      "-f",
+      "f32le",
+      "-",
+    ]);
+    const samples = new Float32Array(
+      exported.stdout.buffer,
+      exported.stdout.byteOffset,
+      exported.stdout.byteLength / 4,
+    );
+    const previewParts = await Promise.all(
+      clips.map((clip) =>
+        decodeAudioSlice(
+          store,
+          clip.trackId,
+          clip.start,
+          clip.end,
+          undefined,
+          clip.speed,
+        ),
+      ),
+    );
+    const expected = new Float32Array(samples.length);
+    previewParts.forEach((part, index) =>
+      expected.set(
+        new Float32Array(part),
+        Math.round(clips[index].offset * 48000) * 2,
+      ),
+    );
+    expect(samples.length).toBe(1.2 * 48000 * 2);
+    let maximumError = 0;
+    for (let index = 0; index < samples.length; index++)
+      maximumError = Math.max(
+        maximumError,
+        Math.abs(samples[index] - expected[index]),
+      );
+    expect(maximumError).toBeLessThan(0.000001);
   });
   it("rejects an invalid media import before touching a destination", async () => {
     const fake = path.join(directory, "not-audio.txt");

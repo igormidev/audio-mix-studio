@@ -37,6 +37,8 @@ export interface AudioSegment {
   end: number;
   text: string;
   enabled: boolean;
+  /** A reversible master cut, independent of which variation is selected. */
+  excluded?: boolean;
 }
 export interface SentenceGroup {
   id: string;
@@ -98,6 +100,10 @@ export interface MasterClip extends AudioSegment {
   pauseBeforeMs?: number;
   fadeInMs?: number;
   fadeOutMs?: number;
+}
+export interface MasterTimelineClip extends MasterClip {
+  /** Compressed playback position; offset retains the visible cut ranges. */
+  playbackOffset: number;
 }
 export interface AnalysisGroup {
   text: string;

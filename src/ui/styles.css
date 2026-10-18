@@ -2628,3 +2628,136 @@ kbd {
 .sentence-add-audio:hover {
   color: var(--green-text);
 }
+
+/* Master cuts retain a visible, restorable source range. */
+.master-tools {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  margin-left: 7px;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+}
+.master-tool {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  color: var(--secondary);
+  background: transparent;
+}
+.master-tool:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.master-tool[aria-pressed="true"] {
+  color: var(--green-text);
+  background: var(--surface);
+  box-shadow: 0 1px 3px var(--shadow);
+}
+.master-clips {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.master-timeline[data-mode="seek"] .master-clips,
+.master-timeline[data-mode="seek"] .master-clip {
+  cursor: pointer;
+}
+.master-timeline[data-mode="cut"] .master-clips,
+.master-timeline[data-mode="cut"] .master-clip {
+  cursor: crosshair;
+}
+.master-clip:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: -2px;
+  z-index: 1;
+}
+.master-clip.excluded .master-clip-text {
+  color: var(--secondary);
+}
+.master-clip.excluded .waveform {
+  opacity: 0.65;
+}
+.master-cut-selection {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  min-width: 1px;
+  border-left: 1px solid var(--green);
+  border-right: 1px solid var(--green);
+  background: color-mix(in srgb, var(--green) 20%, transparent);
+  pointer-events: none;
+  z-index: 4;
+}
+.master-cut-selection > span {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  padding: 3px 6px;
+  border: 1px solid var(--green-line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--green-text);
+  font:
+    10px "Geist Mono",
+    monospace;
+}
+.master-context-menu {
+  position: fixed;
+  z-index: 160;
+  min-width: 165px;
+  padding: 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface-raised);
+  box-shadow: 0 5px 24px var(--shadow);
+}
+.master-context-menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 12px;
+}
+.master-context-menu button:hover,
+.master-context-menu button:focus-visible {
+  background: var(--surface-hover);
+  outline: none;
+}
+.sentence-row {
+  scroll-margin-block: 12px;
+}
+.sentence-row.is-playing {
+  background: color-mix(in srgb, var(--green-soft) 45%, transparent);
+  border-radius: 5px;
+  content-visibility: visible;
+}
+.sentence-row.is-playing::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--green-line);
+}
+.sentence-row.is-playing .sentence-number,
+.sentence-row.is-playing .sentence-heading h3 {
+  color: var(--green-text);
+}

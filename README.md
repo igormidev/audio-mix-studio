@@ -21,6 +21,8 @@ Built for faceless YouTube channels, voiceovers, and anyone who has ever thought
 - **Match meaning across scripts.** Codex groups the same idea even when the wording changes. Extra sentences become their own groups, with only the takes that contain them.
 - **Make precise manual edits.** See every source waveform and its sentence cuts. Click to mute or include a segment, use the scissors to split it, or edit its start and end time. Active segments are colored; muted ones are gray.
 - **Hear the final sequence.** The master stays at the top, with playback, seeking, and color-coded source clips. Scroll or pinch over it to zoom; scroll horizontally to pan. Hover a clip to read its full sentence. Take cards show each source’s share of the audible mix.
+- **Cut directly in the master.** Use the scissors beside **Master track**, then drag across a range to exclude it. Gray ranges remain visible for editing; playback jumps over them and export removes them without added silence. Right-click a gray range and choose **Restore audio**, or Undo. The pointer tool returns to click-to-seek.
+- **Follow the narration.** Master playback subtly highlights the current sentence and scrolls the Sentence choices list to it.
 - **Keep control.** Skip a sentence, move it up or down, combine pieces from different takes, and undo or redo edits.
 - **Export real audio.** Download stereo 48 kHz, 24-bit WAV or 320 kbps MP3, with optional tiny edge fades to reduce clicks.
 - **Save your work.** Automatic session recovery plus portable project files with their source audio. Export the complete transcript/alignment JSON too.
@@ -101,6 +103,9 @@ Open **Quick guide → Let’s make a mix** for three real, locally synthesized 
 - Automatic boundaries partition each source from its first sample to its last. The gap between two speech ranges is divided at its midpoint, so half stays with each sentence; source silence is retained. Boundaries are rounded to the 48 kHz sample grid. Trims and cuts remain explicit user edits.
 - Existing unedited automatic cuts are migrated when their original transcript and boundaries can be verified. Ambiguous legacy cuts, manual trims, and splits are preserved. Regroup an older manually edited project to create a fresh complete partition; Undo remains available.
 - To replace a sentence, use its **Add audio** button or drop one or more short files onto that row in **Sentence choices**. Only the hovered sentence is highlighted. Each complete file becomes an unselected alternative there, including its original silence, without transcription or AI grouping. Undo removes the addition. Drops onto search, dividers, or blank areas in Sentence choices do not import full takes. Sentence-only files stay attached when regrouping preserves their sentence; if a target cannot be identified safely, regrouping stops and keeps your current mix.
+- Master cuts are saved independently of your take choice. Switching to another take and back preserves the excluded ranges. They also appear gray in Manual edit, where clicking restores them. Sentence previews omit the cuts; full-source previews in Manual edit still play the original recording. The timeline retains gray ranges while its playback/export clock counts only audible audio and explicit joint pauses.
+- Master following scrolls only Sentence choices during master playback. Previewing a variation, opening a dialog, searching, or using Manual edit does not move that list.
+- Regrouping a full take with master exclusions stops before replacing your edits; restore its gray ranges first. Sentence-only alternatives retain their exclusions under the existing safe regrouping rules.
 - Split pieces retain their sentence text as context. Choosing that take again selects all surviving pieces. A variation preview plays those pieces in order, including any trims.
 - Hover the divider between audible sentences for **fade-out · pause · fade-in** controls. Pauses add silence; fades change volume at the two edges without overlapping clips or shortening the mix. In **Studio settings → Joints**, set independent default fade-in, fade-out, and pause values. All start at 0 ms. Each joint inherits defaults for fields without an explicit override. Skipping a sentence reconnects the neighboring audible sentences.
 - Sentence speed affects both variation previews and the master/export. Full-source previews in Manual edit remain at their original speed. Fades can be up to 5 seconds and pauses up to 10 seconds; fades are limited by the actual clip duration.
@@ -162,6 +167,7 @@ npx tsx scripts/smoke-electron.ts  # production Electron IPC/media, isolated pro
 npx tsx scripts/smoke-ui.ts        # real sentence/manual editor interactions
 npx tsx scripts/smoke-tabs.ts      # tabs, background ownership, themes, restart, exact export
 npx tsx scripts/smoke-editing.ts   # compact editor, speed, joints, zoom, guide, models
+npx tsx scripts/smoke-master-cuts.ts # master range cuts, cursor jumps, restore, sentence follow
 npx tsx scripts/smoke-snippets.ts  # sentence-only import/drop, history, export, recovery
 npx tsx scripts/smoke-recovery.ts  # per-tab missing media, future formats, export preference
 npx tsx scripts/smoke-installed.ts # installed /Applications bundle, minimal Finder PATH

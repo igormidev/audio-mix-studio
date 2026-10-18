@@ -4,6 +4,7 @@ import {
   type AudioSegment,
   type AudioTrack,
   type MasterClip,
+  type MasterTimelineClip,
   type MixProject,
   type SentenceGroup,
   type TimedText,
@@ -306,7 +307,9 @@ export function masterClips(project: MixProject): MasterClip[] {
     const active = group.segmentIds
       .map((segmentId) => byId.get(segmentId))
       .filter((segment): segment is AudioSegment =>
-        Boolean(segment?.enabled && segment.groupId === group.id),
+        Boolean(
+          segment?.enabled && !segment.excluded && segment.groupId === group.id,
+        ),
       )
       .sort(
         (a, b) =>
@@ -323,6 +326,9 @@ export function masterClips(project: MixProject): MasterClip[] {
         48_000;
       const speed = group.speed ?? 1;
       const duration = Math.round((sourceDuration * 48_000) / speed) / 48_000;
+      // A retained source fragment can quantize to zero output samples at high
+      // speed. Keep its source edit, but never send a zero-frame clip to audio.
+      if (duration === 0) continue;
       let pauseBeforeMs = 0;
       let fadeInMs = 0;
       const previous = clips[clips.length - 1];
@@ -362,6 +368,212 @@ export function masterDuration(project: MixProject): number {
   return last ? last.offset + last.duration : 0;
 }
 
+/** The visible assembly retains selected cut pieces; playback omits them. */
+export function masterTimelineClips(project: MixProject): MasterTimelineClip[] {
+  const audible = new Map(masterClips(project).map((clip) => [clip.id, clip]));
+  const byId = new Map(
+    project.segments.map((segment) => [segment.id, segment]),
+  );
+  const trackOrder = new Map(
+    project.tracks.map((track, index) => [track.id, index]),
+  );
+  const seen = new Set<string>();
+  const timeline: MasterTimelineClip[] = [];
+  let visualOffset = 0;
+  let playbackOffset = 0;
+  for (const group of project.groups) {
+    const selected = group.segmentIds
+      .map((segmentId) => byId.get(segmentId))
+      .filter((segment): segment is AudioSegment =>
+        Boolean(segment?.enabled && segment.groupId === group.id),
+      )
+      .sort(
+        (a, b) =>
+          (trackOrder.get(a.trackId) ?? 0) - (trackOrder.get(b.trackId) ?? 0) ||
+          a.start - b.start ||
+          a.end - b.end,
+      );
+    for (const segment of selected) {
+      if (seen.has(segment.id)) continue;
+      seen.add(segment.id);
+      const clip = audible.get(segment.id);
+      if (clip) {
+        visualOffset += Math.round((clip.pauseBeforeMs ?? 0) * 48) / 48_000;
+        timeline.push({
+          ...clip,
+          offset: visualOffset,
+          playbackOffset: clip.offset,
+        });
+        visualOffset += clip.duration;
+        playbackOffset = clip.offset + clip.duration;
+      } else {
+        const sourceDuration =
+          (Math.round(segment.end * 48_000) -
+            Math.round(segment.start * 48_000)) /
+          48_000;
+        const speed = group.speed ?? 1;
+        const duration = Math.round((sourceDuration * 48_000) / speed) / 48_000;
+        timeline.push({
+          ...segment,
+          offset: visualOffset,
+          duration,
+          sourceDuration,
+          speed,
+          pauseBeforeMs: 0,
+          fadeInMs: 0,
+          fadeOutMs: 0,
+          playbackOffset,
+        });
+        visualOffset += duration;
+      }
+    }
+  }
+  return timeline;
+}
+
+export function masterTimelineDuration(project: MixProject): number {
+  const clips = masterTimelineClips(project);
+  const last = clips.at(-1);
+  return last ? last.offset + last.duration : 0;
+}
+
+/** Right-biased boundaries make the cursor jump immediately over omitted audio. */
+export function masterToTimelineTime(
+  timeline: MasterTimelineClip[],
+  time: number,
+): number {
+  if (!Number.isFinite(time)) throw new Error("Playback time must be finite.");
+  const target = Math.max(0, time);
+  for (const clip of timeline) {
+    if (clip.excluded) continue;
+    const pause = Math.round((clip.pauseBeforeMs ?? 0) * 48) / 48_000;
+    const pauseStart = clip.playbackOffset - pause;
+    if (target >= pauseStart && target < clip.playbackOffset)
+      return clip.offset - pause + target - pauseStart;
+    if (
+      target >= clip.playbackOffset &&
+      target < clip.playbackOffset + clip.duration
+    )
+      return clip.offset + target - clip.playbackOffset;
+  }
+  const last = timeline.at(-1);
+  return last ? last.offset + last.duration : 0;
+}
+
+/** A seek into a gray cut resolves to its compressed playback boundary. */
+export function timelineToMasterTime(
+  timeline: MasterTimelineClip[],
+  time: number,
+): number {
+  if (!Number.isFinite(time)) throw new Error("Timeline time must be finite.");
+  const target = Math.max(0, time);
+  for (const clip of timeline) {
+    const pause = Math.round((clip.pauseBeforeMs ?? 0) * 48) / 48_000;
+    if (target >= clip.offset - pause && target < clip.offset)
+      return clip.playbackOffset - pause + target - (clip.offset - pause);
+    if (target >= clip.offset && target < clip.offset + clip.duration)
+      return clip.playbackOffset + (clip.excluded ? 0 : target - clip.offset);
+  }
+  const last = timeline.at(-1);
+  return last ? last.playbackOffset + (last.excluded ? 0 : last.duration) : 0;
+}
+
+/** Cut only the selected source samples intersecting a visible master drag. */
+export function excludeMasterRange(
+  project: MixProject,
+  start: number,
+  end: number,
+): MixProject {
+  if (!Number.isFinite(start) || !Number.isFinite(end))
+    throw new Error("A master cut must have finite boundaries.");
+  const left = Math.max(0, Math.min(start, end));
+  const right = Math.max(0, Math.max(start, end));
+  if (left === right) return project;
+  const replacements = new Map<string, AudioSegment[]>();
+  const sources = new Map(
+    project.segments.map((segment) => [segment.id, segment]),
+  );
+  for (const clip of masterTimelineClips(project)) {
+    if (clip.excluded || clip.duration <= 0) continue;
+    const cutStart = Math.max(left, clip.offset);
+    const cutEnd = Math.min(right, clip.offset + clip.duration);
+    if (cutEnd <= cutStart) continue;
+    const firstFrame = Math.round(clip.start * 48_000);
+    const lastFrame = Math.round(clip.end * 48_000);
+    const frames = lastFrame - firstFrame;
+    const from = Math.max(
+      firstFrame,
+      Math.min(
+        lastFrame,
+        firstFrame +
+          Math.round(((cutStart - clip.offset) / clip.duration) * frames),
+      ),
+    );
+    const to = Math.max(
+      firstFrame,
+      Math.min(
+        lastFrame,
+        firstFrame +
+          Math.round(((cutEnd - clip.offset) / clip.duration) * frames),
+      ),
+    );
+    if (to <= from) continue;
+    const source = sources.get(clip.id)!;
+    const parts: AudioSegment[] = [];
+    const append = (from: number, to: number, excluded: boolean) => {
+      parts.push({
+        ...source,
+        id: parts.length ? id("segment") : source.id,
+        start: from / 48_000,
+        end: to / 48_000,
+        ...(excluded ? { excluded: true } : {}),
+      });
+    };
+    if (from > firstFrame) append(firstFrame, from, false);
+    append(from, to, true);
+    if (to < lastFrame) append(to, lastFrame, false);
+    replacements.set(source.id, parts);
+  }
+  if (!replacements.size) return project;
+  const segments = project.segments.flatMap(
+    (segment) => replacements.get(segment.id) ?? [segment],
+  );
+  if (segments.length > MAX_SEGMENTS)
+    throw new Error("The project contains too many audio segments.");
+  return updated({
+    ...project,
+    segments,
+    groups: project.groups.map((group) => ({
+      ...group,
+      segmentIds: group.segmentIds.flatMap(
+        (segmentId) =>
+          replacements.get(segmentId)?.map((segment) => segment.id) ?? [
+            segmentId,
+          ],
+      ),
+    })),
+  });
+}
+
+export function restoreMasterSegment(
+  project: MixProject,
+  segmentId: string,
+): MixProject {
+  const segment = project.segments.find(
+    (candidate) => candidate.id === segmentId,
+  );
+  if (!segment) throw new Error("The selected segment no longer exists.");
+  if (!segment.excluded) return project;
+  return updated({
+    ...project,
+    segments: project.segments.map((candidate) =>
+      candidate.id === segmentId
+        ? { ...candidate, excluded: false }
+        : candidate,
+    ),
+  });
+}
+
 /** A variation includes every surviving piece after manual splits or trims. */
 export function chooseVariation(
   project: MixProject,
@@ -395,7 +607,9 @@ export function toggleSegment(
     ...project,
     segments: project.segments.map((segment) =>
       segment.id === segmentId
-        ? { ...segment, enabled: !segment.enabled }
+        ? segment.excluded
+          ? { ...segment, enabled: true, excluded: false }
+          : { ...segment, enabled: !segment.enabled }
         : segment,
     ),
   });
@@ -600,6 +814,19 @@ export function applyAlignment(
   const inputGroups = array(root.groups, "Alignment groups", MAX_GROUPS);
   if (!inputGroups.length)
     throw new Error("The analysis did not return any sentences.");
+  const scopedIds = new Set(
+    project.tracks
+      .filter((track) => track.sentenceGroupId !== undefined)
+      .map((track) => track.id),
+  );
+  if (
+    project.segments.some(
+      (segment) => segment.excluded && !scopedIds.has(segment.trackId),
+    )
+  )
+    throw new Error(
+      "Regrouping would replace removed master audio. Restore the removed ranges or undo their cuts before regrouping.",
+    );
   const tracks = new Map(
     project.tracks
       .filter((track) => track.sentenceGroupId === undefined)
@@ -1146,6 +1373,8 @@ export function parseProject(value: unknown): MixProject {
     validateRange(start, end, track.duration, "Audio segment");
     if (typeof segment.enabled !== "boolean")
       throw new Error("Segment selection must be a boolean.");
+    if (segment.excluded !== undefined && typeof segment.excluded !== "boolean")
+      throw new Error("Segment exclusion must be a boolean.");
     return {
       id: string(segment.id, "Segment ID", 200),
       trackId,
@@ -1154,6 +1383,7 @@ export function parseProject(value: unknown): MixProject {
       end: Math.min(track.duration, end),
       text: string(segment.text, "Segment text", 20_000, true),
       enabled: segment.enabled,
+      ...(segment.excluded !== undefined ? { excluded: segment.excluded } : {}),
     };
   });
   unique(

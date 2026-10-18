@@ -303,20 +303,32 @@ export function usePlayer(
         stop();
         return;
       }
-      let offset = 0;
-      const items = segments.map((segment, index) => {
+      // The row's first segment remains the preview identity even when that
+      // segment is cut. Selection and exclusion are independent: alternatives
+      // can be previewed without becoming selected, but excluded audio stays out.
+      const previewIdentity = segments[0].id;
+      const audible = segments.flatMap((segment) => {
+        if (segment.excluded) return [];
         const speed =
           project.groups.find((group) => group.id === segment.groupId)?.speed ??
           1;
-        const groupClips = clips.filter(
-          (clip) => clip.groupId === segment.groupId,
-        );
         const duration =
           Math.round(
             (Math.round(segment.end * PCM_SAMPLE_RATE) -
               Math.round(segment.start * PCM_SAMPLE_RATE)) /
               speed,
           ) / PCM_SAMPLE_RATE;
+        return duration > 0 ? [{ segment, speed, duration }] : [];
+      });
+      if (!audible.length) {
+        stop();
+        return;
+      }
+      let offset = 0;
+      const items = audible.map(({ segment, speed, duration }, index) => {
+        const groupClips = clips.filter(
+          (clip) => clip.groupId === segment.groupId,
+        );
         const item = {
           ...segment,
           offset,
@@ -324,14 +336,14 @@ export function usePlayer(
           duration,
           fadeInMs: index === 0 ? (groupClips[0]?.fadeInMs ?? 0) : 0,
           fadeOutMs:
-            index === segments.length - 1
+            index === audible.length - 1
               ? (groupClips[groupClips.length - 1]?.fadeOutMs ?? 0)
               : 0,
         };
         offset += duration;
         return item;
       });
-      void playItems(items, 0, segments[0].id);
+      void playItems(items, 0, previewIdentity);
     },
     [playItems, stop, project.groups, clips],
   );
