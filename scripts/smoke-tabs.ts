@@ -265,15 +265,9 @@ try {
   await loadDemo(page, "Delivery B");
   await choose(page, "03");
   await current(page)
-    .getByRole("tab", { name: "Manual edit", exact: true })
+    .getByRole("button", { name: "Skip sentence 1", exact: true })
     .click();
-  const enabled = await current(page)
-    .locator(".source-segment.enabled")
-    .count();
-  await current(page).locator(".source-segment.enabled").first().click();
-  await expect(current(page).locator(".source-segment.enabled")).toHaveCount(
-    enabled - 1,
-  );
+  await expect(current(page).locator(".sentence-row.skipped")).toHaveCount(1);
   const b = await savedProject(page, "Delivery B");
 
   await projectTab(page, "Delivery A").click();
@@ -325,15 +319,11 @@ try {
   await current(page)
     .getByRole("button", { name: "Undo", exact: true })
     .click();
-  await expect(current(page).locator(".source-segment.enabled")).toHaveCount(
-    enabled,
-  );
+  await expect(current(page).locator(".sentence-row.skipped")).toHaveCount(0);
   await current(page)
     .getByRole("button", { name: "Redo", exact: true })
     .click();
-  await expect(current(page).locator(".source-segment.enabled")).toHaveCount(
-    enabled - 1,
-  );
+  await expect(current(page).locator(".sentence-row.skipped")).toHaveCount(1);
   await app.evaluate(() => {
     const scope = globalThis as typeof globalThis & {
       __mixstudioPendingAnalysis?: {
@@ -379,20 +369,16 @@ try {
     "true",
   );
   await current(page)
-    .getByRole("tab", { name: "Manual edit", exact: true })
+    .getByRole("tab", { name: /^Sentence choices/ })
     .click();
   await current(page)
     .getByRole("button", { name: "Undo", exact: true })
     .click();
-  await expect(current(page).locator(".source-segment.enabled")).toHaveCount(
-    enabled,
-  );
+  await expect(current(page).locator(".sentence-row.skipped")).toHaveCount(0);
   await current(page)
     .getByRole("button", { name: "Redo", exact: true })
     .click();
-  await expect(current(page).locator(".source-segment.enabled")).toHaveCount(
-    enabled - 1,
-  );
+  await expect(current(page).locator(".sentence-row.skipped")).toHaveCount(1);
   await page
     .getByRole("button", { name: "Close Scratch", exact: true })
     .click();

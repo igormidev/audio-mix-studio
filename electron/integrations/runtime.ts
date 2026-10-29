@@ -78,11 +78,15 @@ export function externalRuntime(): string {
 }
 
 export async function findExecutable(
-  name: "codex" | "ffmpeg",
+  name: "codex" | "ffmpeg" | "soundstretch",
 ): Promise<string | undefined> {
   const override =
     process.env[
-      name === "codex" ? "AUDIO_MIX_CODEX_PATH" : "AUDIO_MIX_FFMPEG_PATH"
+      name === "codex"
+        ? "AUDIO_MIX_CODEX_PATH"
+        : name === "soundstretch"
+          ? "AUDIO_MIX_SOUNDTOUCH_PATH"
+          : "AUDIO_MIX_FFMPEG_PATH"
     ];
   const directories = [
     ...(process.env.PATH ?? "").split(delimiter),

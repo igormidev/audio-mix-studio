@@ -1,3 +1,4 @@
+import { parseSoundMix, validAudioRole, validPlaybackSpeed } from "./soundMix";
 import {
   transcriptionModels,
   type AlignmentResult,
@@ -125,8 +126,7 @@ export function setGroupSpeed(
   groupId: string,
   speed: number,
 ): MixProject {
-  if (!sentenceSpeeds.includes(speed as (typeof sentenceSpeeds)[number]))
-    throw new Error("Sentence speed must be 0.5×–2.5× in 0.25× steps.");
+  validPlaybackSpeed(speed);
   const group = project.groups.find((group) => group.id === groupId);
   if (!group) throw new Error("The selected sentence no longer exists.");
   if ((group.speed ?? 1) === speed) return project;
@@ -761,6 +761,16 @@ export function removeTrack(project: MixProject, trackId: string): MixProject {
     segments,
     groups,
     jointOverrides,
+    ...(project.soundMix
+      ? {
+          soundMix: {
+            ...project.soundMix,
+            placements: project.soundMix.placements.filter(
+              (clip) => clip.trackId !== trackId,
+            ),
+          },
+        }
+      : {}),
   });
 }
 
@@ -829,7 +839,11 @@ export function applyAlignment(
     );
   const tracks = new Map(
     project.tracks
-      .filter((track) => track.sentenceGroupId === undefined)
+      .filter(
+        (track) =>
+          track.sentenceGroupId === undefined &&
+          (track.role ?? "voiceover") === "voiceover",
+      )
       .map((track) => [track.id, track]),
   );
   const scopedTracks = project.tracks.filter(
@@ -1111,7 +1125,7 @@ export function createDemoProject(tracks: AudioTrack[]): MixProject {
     groups: [
       {
         text: "Listen to each take and choose your favorite.",
-        note: "These are real sample recordings. You can also split, trim, and combine them in Manual edits.",
+        note: "These are real sample recordings. Choose a take here, then arrange music and sound effects in the mix workspace.",
         variations: tracks.map((track) => ({
           trackId: track.id,
           start: 0,
@@ -1250,6 +1264,7 @@ function parseTrack(value: unknown, label: string): AudioTrack {
     peaks,
     mediaUrl: string(track.mediaUrl, `${label} media URL`, 16_384),
     ...(transcript ? { transcript } : {}),
+    ...(track.role !== undefined ? { role: validAudioRole(track.role) } : {}),
     ...(track.sentenceGroupId !== undefined
       ? {
           sentenceGroupId: string(
@@ -1329,8 +1344,7 @@ export function parseProject(value: unknown): MixProject {
     unique(segmentIds, "Sentence segment IDs");
     const speed =
       group.speed === undefined ? 1 : number(group.speed, "Sentence speed");
-    if (!sentenceSpeeds.includes(speed as (typeof sentenceSpeeds)[number]))
-      throw new Error("Sentence speed must be 0.5×–2.5× in 0.25× steps.");
+    validPlaybackSpeed(speed);
     return {
       id: string(group.id, "Sentence ID", 200),
       text: string(group.text, "Sentence text", 20_000),
@@ -1360,6 +1374,8 @@ export function parseProject(value: unknown): MixProject {
     const track = trackMap.get(trackId);
     if (!track)
       throw new Error("An audio segment refers to a missing source track.");
+    if ((track.role ?? "voiceover") !== "voiceover")
+      throw new Error("Only voiceover sources can be sentence choices.");
     const groupId = string(segment.groupId, "Segment sentence ID", 200);
     if (!groupMap.has(groupId))
       throw new Error("An audio segment refers to a missing sentence.");
@@ -1485,5 +1501,8 @@ export function parseProject(value: unknown): MixProject {
     jointOverrides,
     codex,
     updatedAt,
+    ...(input.soundMix !== undefined
+      ? { soundMix: parseSoundMix(input.soundMix, tracks) }
+      : {}),
   };
 }

@@ -22,8 +22,27 @@ const api: StudioAPI = {
   importPaths: (paths: string[], projectId?: string) =>
     ipcRenderer.invoke("studio:importPaths", paths, projectId),
   pathForFile: (file: File) => webUtils.getPathForFile(file),
-  audioSlice: (trackId: string, start: number, end: number, speed?: number) =>
-    ipcRenderer.invoke("studio:audioSlice", trackId, start, end, speed),
+  audioSlice: (
+    trackId: string,
+    start: number,
+    end: number,
+    speed?: number,
+    logicalSource?: { start: number; end: number },
+    projectId?: string,
+  ) =>
+    ipcRenderer.invoke(
+      "studio:audioSlice",
+      trackId,
+      start,
+      end,
+      speed,
+      logicalSource,
+      projectId,
+    ),
+  mixSlice: (project, start, end) =>
+    ipcRenderer.invoke("studio:mixSlice", project, start, end),
+  cancelPlayback: (projectId) =>
+    ipcRenderer.invoke("studio:cancelPlayback", projectId),
   analyze: (project: MixProject) =>
     ipcRenderer.invoke("studio:analyze", project),
   setupTranscription: (model: TranscriptionModel, projectId?: string) =>
@@ -43,7 +62,7 @@ const api: StudioAPI = {
     ipcRenderer.invoke("studio:alignment", project),
   demoProject: (projectId?: string) =>
     ipcRenderer.invoke("studio:demo", projectId),
-  openExternal: (target: "codex" | "ffmpeg" | "whisperx") =>
+  openExternal: (target: "codex" | "ffmpeg" | "whisperx" | "soundtouch") =>
     ipcRenderer.invoke("studio:external", target),
   onProgress(listener: (progress: OperationProgress | null) => void) {
     const handler = (

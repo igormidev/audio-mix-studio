@@ -4,7 +4,7 @@
 
 **Every sentence. Your favorite take.**
 
-A local macOS app for turning several AI voice recordings into one narration you love. Import your ElevenLabs takes, listen to the different versions of each sentence, and pick your favorite. Your master track updates as you choose.
+A local macOS audio suite for turning several AI voice recordings into one narration, then layering music and sound effects. Import your ElevenLabs takes, listen to the different versions of each sentence, and pick your favorite. Your master track updates as you choose.
 
 Built for faceless YouTube channels, voiceovers, and anyone who has ever thought, “I like the first half of take one and the ending of take two.”
 
@@ -17,9 +17,11 @@ Built for faceless YouTube channels, voiceovers, and anyone who has ever thought
 - **Compare sentences, not entire files.** Preview variations side by side and click anywhere on a card to select it. The play button previews without changing your choice.
 - **Replace just one sentence.** Click **Add audio** on its row, or drop a short recording onto that sentence. The file becomes another choice for that sentence only; preview and select it when ready. Your existing choice and the rest of the mix stay intact.
 - **Keep the original pacing.** Automatic cuts meet halfway through the silence between sentences. Selecting a complete take in its original order at 1x, with no added pauses or fades, preserves its complete source audio.
-- **Control speed and joints.** Change each sentence from 0.5x to 2.5x in 0.25 steps without changing pitch. Hover a divider to set the preceding fade-out, extra pause, and following fade-in. All defaults start at zero.
+- **Control speed and joints.** Change speed from 0.5x to 2x in 1% steps without changing pitch, using SoundTouch—the tempo engine used by Audacity’s Change Tempo effect. Hover a divider to set the preceding fade-out, extra pause, and following fade-in. All defaults start at zero.
 - **Match meaning across scripts.** Codex groups the same idea even when the wording changes. Extra sentences become their own groups, with only the takes that contain them.
-- **Make precise manual edits.** See every source waveform and its sentence cuts. Click to mute or include a segment, use the scissors to split it, or edit its start and end time. Active segments are colored; muted ones are gray.
+- **Build a soundtrack.** Open **Music & Sound Track** for a synchronized waveform timeline with one voiceover reference, Music 1, and Soundtrack 1. Add music/effect tracks, drag their names to reorder, and confirm before deleting.
+- **Shape each clip.** Stage clips in a track’s **+** dialog, drag them into position, and save. Click a clip for volume, speed, fade timing, illustrated fade curves, and a custom curve control.
+- **Edit between keyframes.** Add a keyframe at the main cursor to define another section. Each section has its own speed, volume, and fades; later sections move with its duration. Voiceover controls change sentence speed and keep neighboring narration snapped together.
 - **Hear the final sequence.** The master stays at the top, with playback, seeking, and color-coded source clips. Scroll or pinch over it to zoom; scroll horizontally to pan. Hover a clip to read its full sentence. Take cards show each source’s share of the audible mix.
 - **Cut directly in the master.** Use the scissors beside **Master track**, then drag across a range to exclude it. Gray ranges remain visible for editing; playback jumps over them and export removes them without added silence. Right-click a gray range and choose **Restore audio**, or Undo. The pointer tool returns to click-to-seek.
 - **Follow the narration.** Master playback subtly highlights the current sentence and scrolls the Sentence choices list to it.
@@ -34,13 +36,14 @@ There is no chat interface. AI organizes your recordings in the background; you 
 
 The initial desktop release supports **macOS 13 or later on Apple Silicon (M-series)**.
 
-| Tool               | Purpose                             | Setup                                                                                 |
-| ------------------ | ----------------------------------- | ------------------------------------------------------------------------------------- |
-| FFmpeg and FFprobe | Decode, waveform, preview, export   | `brew install ffmpeg`                                                                 |
-| Codex CLI          | Group equivalent sentences          | Install [Codex CLI](https://developers.openai.com/codex/cli/), then run `codex login` |
-| WhisperX 3.8.6     | Local transcription and word timing | Prepared by the app in a private Python environment                                   |
+| Tool                        | Purpose                                      | Setup                                                                                 |
+| --------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------- |
+| FFmpeg and FFprobe          | Decode, waveform, preview, export            | `brew install ffmpeg`                                                                 |
+| SoundTouch (`soundstretch`) | Pitch-preserving tempo, shared with Audacity | `brew install sound-touch`                                                            |
+| Codex CLI                   | Group equivalent sentences                   | Install [Codex CLI](https://developers.openai.com/codex/cli/), then run `codex login` |
+| WhisperX 3.8.6              | Local transcription and word timing          | Prepared by the app in a private Python environment                                   |
 
-Open **Studio settings** to check all tools. If Codex is missing or signed out, the app explains how to install/sign in; manual editing remains available. Discovery includes common Homebrew and `~/.local/bin` locations, so launching from Finder works without a shell PATH.
+Open **Studio settings** to check all tools. If Codex is missing or signed out, the app explains how to install/sign in; existing projects remain editable; the first narration import needs speech analysis to succeed. Discovery includes common Homebrew and `~/.local/bin` locations, so launching from Finder works without a shell PATH.
 
 The transcription integration is adapted from [Vandashi](https://github.com/igormidev/Vandashi). It uses exactly the same WhisperX engine, CPU int8 inference, pinned model revisions, Silero speech detection, and word alignment. An existing verified Vandashi installation and downloaded model are reused read-only. Other downloads stay in Audio Mix Studio’s own cache. Vandashi does **not** need to be installed.
 
@@ -87,15 +90,15 @@ Explicit Save still produces a portable project and audio folder. The workspace 
 
 ## Your first mix
 
-1. **Import your takes.** Select one or more audio files or drop them into an empty mix. Once the mix has audio, drop full takes onto the sidebar, master timeline, or Manual edit waveforms. WAV, MP3, M4A, AAC, FLAC, OGG, Opus, AIFF, and other common audio formats are supported. Imports are local copies; originals stay untouched.
-2. **Let the app organize them.** Once transcription is prepared, the first import transcribes and groups automatically. A new Mac is guided to setup first. For additional takes, click **Group sentences**. You can see progress and cancel. Regrouping replaces cuts, with a warning first and Undo afterward.
+1. **Import your narration.** The first file must pass real WhisperX transcription and sentence grouping before it enters the project. A failed analysis leaves the project unchanged. WAV, MP3, M4A, AAC, FLAC, OGG, Opus, AIFF, and other common audio formats are supported. Imports are local copies; originals stay untouched.
+2. **Classify later imports.** Each subsequent file opens a listening dialog: play/pause, seek, skip back/forward, and audition at up to 2x. Choose **Voiceover**, **Sound effect**, or **Music**. Voiceovers become narration choices; music and effects stay in their own libraries. Use the sidebar icon tabs to switch libraries. For additional full narration takes, click **Group sentences**; progress is visible and cancellable.
 3. **Choose each sentence.** Preview the variations, then click the card you prefer. A sentence that appears in only one recording has one option. The first available take is selected initially; AI does not pretend to judge sound quality from text.
-4. **Polish if needed.** In **Manual edit**, click a segment to toggle it. Use **Cut** and click inside a segment to split. Click or right-click a segment for exact start/end controls. Zoom for more precise placement.
-5. **Export master.** Use the button below **Add audio takes** in the sidebar. Choose WAV for editing in your video app, or MP3 for a smaller file. Tabs save automatically; **File → Save project** (⌘S) creates a portable copy.
+4. **Add music and sound effects.** Open **Music & Sound Track**, click **+** beside a track, and drag library audio onto its timeline. Arrange clips and save. Zoom applies across all tracks and the main cursor stays synchronized with the master. Click a music/effect clip to edit its settings or add keyframes. The voiceover lane exposes speed only; sentence choices remain the narration editor.
+5. **Export master.** Use the button below **Add audio** in the sidebar. Choose WAV for editing in your video app, or MP3 for a smaller file. Tabs save automatically; **File → Save project** (⌘S) creates a portable copy.
 
 Open **Quick guide → Let’s make a mix** for three real, locally synthesized takes with shared and unique sentences. The sample uses an empty tab if one is available; otherwise it opens a new tab. It never replaces a mix containing audio. Quick guide appears above Studio settings until the first successful master export, and remains available inside Studio settings afterward. Demo groups are prepared examples; they are labeled as a demo and do not imply an AI analysis ran.
 
-![Manual audio editing in Audio Mix Studio](docs/screenshots/manual-edit.png)
+![Music and sound-effect timeline](docs/screenshots/music-workspace.png)
 
 ### A few useful details
 
@@ -103,12 +106,12 @@ Open **Quick guide → Let’s make a mix** for three real, locally synthesized 
 - Automatic boundaries partition each source from its first sample to its last. The gap between two speech ranges is divided at its midpoint, so half stays with each sentence; source silence is retained. Boundaries are rounded to the 48 kHz sample grid. Trims and cuts remain explicit user edits.
 - Existing unedited automatic cuts are migrated when their original transcript and boundaries can be verified. Ambiguous legacy cuts, manual trims, and splits are preserved. Regroup an older manually edited project to create a fresh complete partition; Undo remains available.
 - To replace a sentence, use its **Add audio** button or drop one or more short files onto that row in **Sentence choices**. Only the hovered sentence is highlighted. Each complete file becomes an unselected alternative there, including its original silence, without transcription or AI grouping. Undo removes the addition. Drops onto search, dividers, or blank areas in Sentence choices do not import full takes. Sentence-only files stay attached when regrouping preserves their sentence; if a target cannot be identified safely, regrouping stops and keeps your current mix.
-- Master cuts are saved independently of your take choice. Switching to another take and back preserves the excluded ranges. They also appear gray in Manual edit, where clicking restores them. Sentence previews omit the cuts; full-source previews in Manual edit still play the original recording. The timeline retains gray ranges while its playback/export clock counts only audible audio and explicit joint pauses.
-- Master following scrolls only Sentence choices during master playback. Previewing a variation, opening a dialog, searching, or using Manual edit does not move that list.
+- Master cuts are saved independently of your take choice. Switching to another take and back preserves the excluded ranges. Sentence previews omit the cuts. The timeline retains gray ranges while its playback/export clock counts only audible audio and explicit joint pauses.
+- Master following scrolls only Sentence choices during master playback. Previewing a variation, opening a dialog, searching, or using the music workspace does not move that list.
 - Regrouping a full take with master exclusions stops before replacing your edits; restore its gray ranges first. Sentence-only alternatives retain their exclusions under the existing safe regrouping rules.
 - Split pieces retain their sentence text as context. Choosing that take again selects all surviving pieces. A variation preview plays those pieces in order, including any trims.
 - Hover the divider between audible sentences for **fade-out · pause · fade-in** controls. Pauses add silence; fades change volume at the two edges without overlapping clips or shortening the mix. In **Studio settings → Joints**, set independent default fade-in, fade-out, and pause values. All start at 0 ms. Each joint inherits defaults for fields without an explicit override. Skipping a sentence reconnects the neighboring audible sentences.
-- Sentence speed affects both variation previews and the master/export. Full-source previews in Manual edit remain at their original speed. Fades can be up to 5 seconds and pauses up to 10 seconds; fades are limited by the actual clip duration.
+- Sentence speed affects both variation previews and the master/export. Fades can be up to 5 seconds and pauses up to 10 seconds; fades are limited by the actual clip duration.
 - Where forced alignment cannot reliably cover all spoken text, the app keeps the real ASR segment timestamps. It does not fabricate word timing.
 
 ### Keyboard shortcuts
@@ -126,7 +129,6 @@ Open **Quick guide → Let’s make a mix** for three real, locally synthesized 
 | ⌘S / ⌘⇧S     | Save / Save as                 |
 | ⌘E           | Export master                  |
 | ⌘Z / ⌘⇧Z     | Undo / Redo                    |
-| C            | Toggle cut tool in Manual edit |
 | Escape       | Stop playback / leave cut mode |
 
 ## Your files and privacy
@@ -155,7 +157,9 @@ There is no app analytics or hosted storage. Downloading dependencies/model weig
 - Apple Silicon macOS only; no Intel/Windows/Linux installer.
 - Up to 50 source tracks and 20,000 segments in a project; exports support up to 5,000 enabled clips. Each source may be up to 16 GiB and 12 hours. Very large transcripts are rejected with an explanation when they exceed one AI analysis request (1.5 MB of input JSON); split those into smaller projects.
 - Semantic matches are proposals. Review them, especially with substantially rewritten scripts, repetitions, or noisy transcription. Codex does not hear the audio or automatically choose the best sounding delivery.
-- This is a narration assembly tool. It does not include multitrack music mixing, loudness normalization, equalization, pitch correction, or an ElevenLabs account integration.
+- Mixing includes clip gain, speed, fades, and section keyframes. It does not include loudness normalization, equalization, pitch correction, or an ElevenLabs account integration.
+- Keyframes are source-time section boundaries. Settings apply to the section after a keyframe; speed is constant within each section, rather than continuously ramping between rates. Music/effect placements stay at their absolute timeline positions when narration speed changes.
+- Summed tracks can exceed full scale. Lower clip volumes when layering several loud sources; the mixer does not silently normalize your levels.
 - Setup requires network access. A completely fresh Python installation is a different path from reusing an existing verified environment; see verification notes below.
 
 ## Development and verification
@@ -164,11 +168,13 @@ There is no app analytics or hosted storage. Downloading dependencies/model weig
 npm run check       # strict TypeScript, ESLint, production build
 npm test            # domain, edit history, playback planning, real FFmpeg, adapters
 npx tsx scripts/smoke-electron.ts  # production Electron IPC/media, isolated profile
-npx tsx scripts/smoke-ui.ts        # real sentence/manual editor interactions
+npx tsx scripts/smoke-ui.ts        # sentence choices and voiceover speed interactions
 npx tsx scripts/smoke-tabs.ts      # tabs, background ownership, themes, restart, exact export
 npx tsx scripts/smoke-editing.ts   # compact editor, speed, joints, zoom, guide, models
 npx tsx scripts/smoke-master-cuts.ts # master range cuts, cursor jumps, restore, sentence follow
 npx tsx scripts/smoke-snippets.ts  # sentence-only import/drop, history, export, recovery
+npx tsx scripts/smoke-first-voiceover.ts # real first-source speech rejection/verification
+npx tsx scripts/smoke-music.ts       # classified imports, multitrack, keyframes, export/recovery
 npx tsx scripts/smoke-recovery.ts  # per-tab missing media, future formats, export preference
 npx tsx scripts/smoke-installed.ts # installed /Applications bundle, minimal Finder PATH
 ```
@@ -185,4 +191,4 @@ See [architecture](docs/ARCHITECTURE.md) for boundaries, data flow, persistence,
 
 ## Credits and license
 
-MIT © 2026 Igor Miranda Souza. Transcription bootstrap/engine adapted from [Vandashi](https://github.com/igormidev/Vandashi), with its [MIT notice](resources/transcription/VANDASHI-LICENSE.txt) preserved. See [transcription resources](resources/transcription/README.md) for upstream engine/model licenses. Electron, React, FFmpeg, WhisperX, and Codex retain their own licenses; FFmpeg and Codex are external installations, not bundled in the app.
+MIT © 2026 Igor Miranda Souza. Transcription bootstrap/engine adapted from [Vandashi](https://github.com/igormidev/Vandashi), with its [MIT notice](resources/transcription/VANDASHI-LICENSE.txt) preserved. See [transcription resources](resources/transcription/README.md) for upstream engine/model licenses. Electron, React, FFmpeg, SoundTouch, WhisperX, and Codex retain their own licenses. FFmpeg, SoundTouch, and Codex are external installations, not bundled in the app. Audacity source was inspected for its Change Tempo integration; no Audacity source is copied or linked into this MIT application. See [tempo implementation](docs/TEMPO.md).

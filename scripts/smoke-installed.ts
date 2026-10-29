@@ -39,6 +39,7 @@ try {
   if (
     !status.codex.available ||
     !status.ffmpeg.available ||
+    !status.soundtouch?.available ||
     !status.whisperx.available ||
     !status.models.some((m) => m.id === "large-v3-turbo" && m.downloaded)
   )
@@ -52,6 +53,20 @@ try {
   await expect(page.locator(".sentence-row")).toHaveCount(4, {
     timeout: 90_000,
   });
+  await page
+    .getByRole("tab", { name: "Music & Sound Track", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: /^Edit voiceover speed:/ })
+    .first()
+    .click();
+  const speed = page.getByRole("spinbutton", {
+    name: "Playback speed value",
+    exact: true,
+  });
+  await speed.fill("1.37");
+  await speed.press("Enter");
+  await expect(speed).toHaveValue("1.37");
   await page.getByRole("button", { name: "Play master", exact: true }).click();
   await expect(
     page.getByRole("slider", { name: "Seek master track" }),
@@ -64,6 +79,8 @@ try {
         minimalFinderPATH: true,
         defaultModel: true,
         tools: true,
+        soundtouch: true,
+        pitchPreservingSpeed: 1.37,
         realDemoPlayback: true,
       },
       null,

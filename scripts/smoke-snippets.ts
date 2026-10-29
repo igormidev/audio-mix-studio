@@ -149,10 +149,22 @@ async function releasePicker(
     delete scope.__snippetPicker;
   }, paths);
 }
+async function acceptVoiceover(page: Page, count = 1) {
+  for (let index = 0; index < count; index++) {
+    const dialog = current(page).getByRole("dialog", {
+      name: "What are we listening to?",
+    });
+    await expect(dialog).toBeVisible();
+    await dialog
+      .getByRole("button", { name: "Add voiceover", exact: true })
+      .click();
+    if (index === count - 1) await expect(dialog).toHaveCount(0);
+  }
+}
 async function ready(page: Page) {
   await expect(current(page).locator(".progress-banner")).toHaveCount(0);
   await expect(
-    current(page).getByRole("button", { name: "Add audio takes", exact: true }),
+    current(page).getByRole("button", { name: "Add audio", exact: true }),
   ).toBeEnabled();
 }
 async function dismiss(page: Page) {
@@ -304,10 +316,10 @@ async function captureDemo(application: ElectronApplication, page: Page) {
     .getByRole("button", { name: "Use light mode", exact: true })
     .click();
   await current(page)
-    .getByRole("tab", { name: "Manual edit", exact: true })
+    .getByRole("tab", { name: "Music & Sound Track", exact: true })
     .click();
   await page.screenshot({
-    path: path.join(artifacts, "snippet-demo-light-manual.png"),
+    path: path.join(artifacts, "snippet-demo-light-music.png"),
   });
   await current(page)
     .getByRole("tab", { name: /^Sentence choices/ })
@@ -387,6 +399,7 @@ try {
   // Native picker creates an unselected full-source variation in only the requested sentence.
   await picker(app, [files[0]]);
   await add().click();
+  await acceptVoiceover(page);
   let withSnippet = await waitProject(
     page,
     initial.id,
@@ -508,6 +521,7 @@ try {
     files.slice(1),
   );
   await dragFile(page, sentence(page, firstGroup.id), "drop", files.slice(1));
+  await acceptVoiceover(page, 2);
   const afterDrop = await waitProject(
     page,
     initial.id,
@@ -542,11 +556,11 @@ try {
     path: path.join(artifacts, "sentence-snippets.png"),
   });
 
-  // Sidebar, master, and the manual wave editor still accept complete takes.
-  for (const region of ["sidebar", "master", "manual"] as const) {
-    if (region === "manual")
+  // Sidebar, master, and the music workspace still accept complete takes.
+  for (const region of ["sidebar", "master", "music"] as const) {
+    if (region === "music")
       await current(page)
-        .getByRole("tab", { name: "Manual edit", exact: true })
+        .getByRole("tab", { name: "Music & Sound Track", exact: true })
         .click();
     const area = current(page).locator(`[data-full-take-drop="${region}"]`);
     await expect(area).toHaveAttribute("data-full-take-drop", region);
@@ -559,6 +573,7 @@ try {
       0,
     );
     await dragFile(page, area, "drop", [files[2]]);
+    await acceptVoiceover(page);
     const after = await waitProject(
       page,
       initial.id,
@@ -590,6 +605,11 @@ try {
   await page.getByRole("button", { name: "New tab", exact: true }).click();
   const scratch = await rename(page, "Empty drop");
   await releasePicker(app, [files[2]]);
+  // Classification belongs to the origin tab and waits until that tab is active.
+  await unchanged(page, beforeBackground);
+  await tab(page, "Sentence replacements").click();
+  await acceptVoiceover(page);
+  await tab(page, "Empty drop").click();
   const completed = await waitProject(
     page,
     initial.id,
@@ -770,7 +790,7 @@ try {
         fullImports: {
           sidebar: true,
           master: true,
-          manualWaveEditor: true,
+          musicWorkspace: true,
           emptyBody: true,
           choiceBlankToolbarAndSearchRejected: true,
         },

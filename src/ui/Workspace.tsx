@@ -28,16 +28,17 @@ import {
   Search,
   Settings2,
   SkipBack,
-  SlidersHorizontal,
+  Music2,
+  Mic2,
   Sparkles,
   Undo2,
   Upload,
-  Volume2,
   VolumeX,
   X,
 } from "lucide-react";
 import type {
   AudioSegment,
+  AudioRole,
   AudioTrack,
   DependencyStatus,
   JointSettings,
@@ -51,19 +52,18 @@ import {
   appendSentenceAlternatives,
   chooseVariation,
   masterClips,
-  masterDuration,
   excludeMasterRange,
   restoreMasterSegment,
   moveGroup,
   removeTrack,
-  splitSegment,
-  toggleSegment,
-  trimSegment,
   setGroupSpeed,
   setJointOverride,
   setJointDefaults,
   effectiveJointSettings,
 } from "../domain/project";
+import { appendLibraryTracks, mixDuration } from "../domain/soundMix";
+import { MusicWorkspace } from "./MusicWorkspace";
+import { ImportKindDialog } from "./ImportKindDialog";
 import { clock, secondsLabel } from "./format";
 import { Settings } from "./Settings";
 import { usePlayer } from "./usePlayer";
@@ -74,7 +74,7 @@ import type { EditorAction, EditorState } from "./editor";
 import { loadDependencies, rememberDependencies } from "./dependencies";
 
 type AudioDropTarget =
-  | { kind: "take"; zone: "empty" | "sidebar" | "master" | "manual" }
+  | { kind: "take"; zone: "empty" | "sidebar" | "master" | "music" }
   | { kind: "sentence"; groupId: string };
 
 export interface WorkspaceProps {
@@ -106,7 +106,7 @@ export const Workspace = memo(function Workspace({
   const { project, past, future } = editor;
   const history = { past, future };
   const [status, setStatus] = useState<DependencyStatus | null>(null);
-  const [tab, setTab] = useState<"choices" | "manual">("choices");
+  const [tab, setTab] = useState<"choices" | "music">("choices");
   const [settings, setSettings] = useState(false);
   const [help, setHelp] = useState(false);
   const [working, setBusy] = useState(false);
@@ -117,15 +117,16 @@ export const Workspace = memo(function Workspace({
   const [exportMenu, setExportMenu] = useState(false);
   const [confirmAlign, setConfirmAlign] = useState(false);
   const [dropTarget, setDropTarget] = useState<AudioDropTarget | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [cutTool, setCutTool] = useState(false);
+  const [libraryTab, setLibraryTab] = useState<AudioRole>("voiceover");
+  const [pendingImport, setPendingImport] = useState<AudioTrack | null>(null);
+  const importChoice = useRef<((role: AudioRole | null) => void) | null>(null);
   const [masterTool, setMasterTool] = useState<"seek" | "cut">("seek");
   const editorViewport = useRef<HTMLElement>(null);
-  const [zoom, setZoom] = useState(1);
   const busy = working;
   const operation = useRef(false);
   const clips = useMemo(() => masterClips(project), [project]);
-  const duration = useMemo(() => masterDuration(project), [project]);
+  const duration = useMemo(() => mixDuration(project), [project]);
+  const hasMasterAudio = duration > 0;
   const player = usePlayer(project, clips, setError);
   const playerStop = player.stop;
   const isPlaying = player.playing;
@@ -173,7 +174,10 @@ export const Workspace = memo(function Workspace({
   const projectRef = useRef(project);
   projectRef.current = project;
   const hasUnanalyzed = project.tracks.some(
-    (t) => !t.sentenceGroupId && !t.transcript,
+    (t) =>
+      (t.role ?? "voiceover") === "voiceover" &&
+      !t.sentenceGroupId &&
+      !t.transcript,
   );
 
   const adopt = useCallback(
@@ -186,7 +190,6 @@ export const Workspace = memo(function Workspace({
         reset,
         now: new Date().toISOString(),
       });
-      setSelected(null);
     },
     [playerStop, dispatch],
   );
@@ -202,13 +205,11 @@ export const Workspace = memo(function Workspace({
     if (operation.current) return;
     playerStop();
     dispatch({ type: "undo" });
-    setSelected(null);
   }, [playerStop, dispatch]);
   const redo = useCallback(() => {
     if (operation.current) return;
     playerStop();
     dispatch({ type: "redo" });
-    setSelected(null);
   }, [playerStop, dispatch]);
   const refresh = useCallback(async (force = false) => {
     try {
@@ -273,55 +274,85 @@ export const Workspace = memo(function Workspace({
       setNotice("Sentences grouped.");
     });
   }, [run, adopt]);
+  const chooseImportKind = useCallback((role: AudioRole | null) => {
+    setPendingImport(null);
+    importChoice.current?.(role);
+    importChoice.current = null;
+  }, []);
+  const classify = useCallback(
+    (track: AudioTrack) =>
+      new Promise<AudioRole | null>((resolve) => {
+        importChoice.current = resolve;
+        setPendingImport(track);
+        setProgress(null);
+      }),
+    [],
+  );
+  useEffect(
+    () => () => {
+      importChoice.current?.(null);
+    },
+    [],
+  );
   const importAudio = useCallback(
-    (paths?: string[]) => {
+    (paths?: string[], sentenceGroupId?: string) => {
       void run(async () => {
         const tracks = paths
           ? await window.studio.importPaths(paths, project.id)
           : await window.studio.importAudio(project.id);
-        if (!tracks.length) return;
-        const hadTracks = projectRef.current.tracks.length > 0;
-        const next = appendTracks(projectRef.current, tracks);
-        adopt(next);
-        if (!hadTracks) {
-          const tools = status ?? (await loadDependencies());
-          if (!tools.whisperx.available) {
-            setStatus(tools);
-            setSettings(true);
-            setError(
-              "Your audio is imported. Prepare WhisperX in Studio settings, then group sentences.",
-            );
-            return;
-          }
-          try {
+        for (const track of tracks) {
+          const hasVoiceover = projectRef.current.tracks.some(
+            (source) => (source.role ?? "voiceover") === "voiceover",
+          );
+          if (!hasVoiceover) {
+            const tools = status ?? (await loadDependencies());
+            if (!tools.whisperx.available || !tools.codex.available) {
+              setStatus(tools);
+              setSettings(true);
+              throw new Error(
+                "Your first source must be a verified voiceover. Prepare WhisperX and Codex in Studio settings, then import your narration again.",
+              );
+            }
+            const next = appendTracks(projectRef.current, [
+              { ...track, role: "voiceover" },
+            ]);
+            // Adoption follows real speech analysis: failed verification never
+            // turns music or an empty transcription into a narration project.
             adopt(await window.studio.analyze(next));
-            setNotice("Sentences grouped.");
-          } catch (e) {
-            setError(
-              `${message(e)} Your audio is imported and available in Manual edit.`,
-            );
+            setLibraryTab("voiceover");
+            setTab("choices");
+            continue;
           }
-        } else setNotice("Audio imported. Group sentences to compare.");
+          const role = await classify(track);
+          if (!role) break;
+          const next =
+            role === "voiceover" && sentenceGroupId
+              ? appendSentenceAlternatives(
+                  projectRef.current,
+                  sentenceGroupId,
+                  [{ ...track, role }],
+                )
+              : appendLibraryTracks(projectRef.current, [track], role);
+          adopt(next);
+          setLibraryTab(role);
+          setTab(role === "voiceover" ? "choices" : "music");
+          setNotice(
+            role === "voiceover"
+              ? "Voiceover added. Group sentences to compare takes."
+              : "Added to your library. Use + on a mix track to place it in the timeline.",
+          );
+        }
       });
     },
-    [run, adopt, status, project.id],
+    [run, adopt, status, project.id, classify],
   );
   const addSentenceAudio = useCallback(
     (groupId: string, paths?: string[]) => {
-      void run(async () => {
-        // Capture the row before opening a picker. A later active tab cannot
-        // redirect this operation, and a missing target is never a full import.
-        if (!projectRef.current.groups.some((g) => g.id === groupId))
-          throw new Error("That sentence is no longer available.");
-        const tracks = paths
-          ? await window.studio.importPaths(paths, project.id)
-          : await window.studio.importAudio(project.id);
-        if (!tracks.length) return;
-        adopt(appendSentenceAlternatives(projectRef.current, groupId, tracks));
-        setNotice("Audio choice added.");
-      });
+      if (!projectRef.current.groups.some((group) => group.id === groupId))
+        return;
+      importAudio(paths, groupId);
     },
-    [run, adopt, project.id],
+    [importAudio],
   );
   const save = useCallback(
     (saveAs = false) => {
@@ -391,10 +422,7 @@ export const Workspace = memo(function Workspace({
       if (action === "save") save();
       if (action === "saveAs") save(true);
       if (action === "open") open();
-      if (
-        action === "export" &&
-        projectRef.current.segments.some((s) => s.enabled && !s.excluded)
-      )
+      if (action === "export" && mixDuration(projectRef.current) > 0)
         exportAudio("wav");
     };
     window.addEventListener("studio-shortcut", shortcut);
@@ -409,13 +437,14 @@ export const Workspace = memo(function Workspace({
         settings ||
         help ||
         confirmAlign ||
+        document.querySelector('[role="dialog"]') ||
         !active
       )
         return;
       if (e.code === "Space") {
         if (target.closest('button,[role="button"],[role="tab"]')) return;
         e.preventDefault();
-        if (!busyRef.current && clips.length) {
+        if (!busyRef.current && hasMasterAudio) {
           if (isPlaying) playerStop();
           else playMaster();
         }
@@ -427,17 +456,13 @@ export const Workspace = memo(function Workspace({
       }
       if (e.key === "Escape") {
         playerStop();
-        setCutTool(false);
-        setSelected(null);
         setExportMenu(false);
       }
-      if (e.key.toLowerCase() === "c" && tab === "manual")
-        setCutTool((c) => !c);
     };
     window.addEventListener("keydown", keys);
     return () => window.removeEventListener("keydown", keys);
   }, [
-    clips.length,
+    hasMasterAudio,
     isPlaying,
     playerStop,
     playMaster,
@@ -517,14 +542,6 @@ export const Workspace = memo(function Workspace({
     (segmentId: string) => edit((p) => restoreMasterSegment(p, segmentId)),
     [edit],
   );
-  const toggle = useCallback(
-    (id: string) => edit((p) => toggleSegment(p, id)),
-    [edit],
-  );
-  const cut = useCallback(
-    (id: string, time: number) => edit((p) => splitSegment(p, id, time)),
-    [edit],
-  );
   const precedingAudibleGroup = useMemo(() => {
     const audible = new Set(clips.map((clip) => clip.groupId));
     const result = new Map<string, SentenceGroup>();
@@ -561,14 +578,16 @@ export const Workspace = memo(function Workspace({
       return { kind: "sentence", groupId: sentence.dataset.sentenceDrop };
     const region = target.closest<HTMLElement>("[data-full-take-drop]");
     const zone = region?.dataset.fullTakeDrop;
-    if (zone === "sidebar" || zone === "master" || zone === "manual")
+    if (zone === "sidebar" || zone === "master" || zone === "music")
       return { kind: "take", zone };
     return null;
   };
   const filteredGroups = project.groups.filter((group) =>
     `${group.text} ${group.note}`.toLowerCase().includes(query.toLowerCase()),
   );
-  const selectedSegment = project.segments.find((s) => s.id === selected);
+  const libraryTracks = project.tracks.filter(
+    (track) => (track.role ?? "voiceover") === libraryTab,
+  );
   return (
     <div
       className="app workspace-page"
@@ -619,15 +638,50 @@ export const Workspace = memo(function Workspace({
             Audio Mix<span className="brand-sub">STUDIO</span>
           </span>
         </div>
+        <div className="library-tabs" role="tablist" aria-label="Audio library">
+          {(
+            [
+              { role: "voiceover", label: "Voiceovers", Icon: Mic2 },
+              { role: "music", label: "Music", Icon: Music2 },
+              { role: "soundtrack", label: "Sound effects", Icon: AudioLines },
+            ] as const
+          ).map(({ role, label, Icon }) => (
+            <button
+              key={role}
+              role="tab"
+              aria-label={label}
+              aria-selected={libraryTab === role}
+              title={label}
+              className={libraryTab === role ? "active" : ""}
+              onClick={() => {
+                const target =
+                  role === "soundtrack" &&
+                  !project.tracks.some((track) => track.role === "soundtrack")
+                    ? "music"
+                    : role;
+                setLibraryTab(target);
+                setTab(role === "voiceover" ? "choices" : "music");
+              }}
+            >
+              <Icon size={18} />
+            </button>
+          ))}
+        </div>
         <div className="sidebar-heading">
-          <span>YOUR TAKES</span>
+          <span>
+            {libraryTab === "voiceover"
+              ? "VOICEOVER TAKES"
+              : libraryTab === "music"
+                ? "MUSIC LIBRARY"
+                : "SOUND EFFECTS"}
+          </span>
           <span className="count">
-            {project.tracks.length.toString().padStart(2, "0")}
+            {libraryTracks.length.toString().padStart(2, "0")}
           </span>
         </div>
         <div className="take-list">
-          {project.tracks.length ? (
-            project.tracks.map((track, i) => (
+          {libraryTracks.length ? (
+            libraryTracks.map((track, i) => (
               <div
                 className="take"
                 key={track.id}
@@ -649,20 +703,44 @@ export const Workspace = memo(function Workspace({
                     <FileAudio2 size={20} />
                   </span>
                   <div className="take-info">
-                    <span className="take-name">Take {i + 1}</span>
+                    <span className="take-name">
+                      {libraryTab === "voiceover"
+                        ? `Take ${i + 1}`
+                        : libraryTab === "music"
+                          ? "Music"
+                          : "Sound effect"}
+                    </span>
                     <span className="take-metadata">
                       {clock(track.duration)}
                       <span className="take-divider">·</span>
                       <strong>
-                        {Math.round(
-                          (clips
-                            .filter((c) => c.trackId === track.id)
-                            .reduce((sum, c) => sum + c.duration, 0) /
-                            (clips.reduce((sum, c) => sum + c.duration, 0) ||
-                              1)) *
-                            100,
+                        {libraryTab === "voiceover" ? (
+                          <>
+                            {Math.round(
+                              (clips
+                                .filter((clip) => clip.trackId === track.id)
+                                .reduce((sum, clip) => sum + clip.duration, 0) /
+                                (clips.reduce(
+                                  (sum, clip) => sum + clip.duration,
+                                  0,
+                                ) || 1)) *
+                                100,
+                            )}
+                            % of narration
+                          </>
+                        ) : (
+                          <>
+                            {project.soundMix?.placements.filter(
+                              (clip) => clip.trackId === track.id,
+                            ).length ?? 0}{" "}
+                            timeline{" "}
+                            {project.soundMix?.placements.filter(
+                              (clip) => clip.trackId === track.id,
+                            ).length === 1
+                              ? "clip"
+                              : "clips"}
+                          </>
                         )}
-                        % of mix
                       </strong>
                     </span>
                   </div>
@@ -682,12 +760,12 @@ export const Workspace = memo(function Workspace({
           onClick={() => importAudio()}
         >
           <Plus size={16} />
-          Add audio takes
+          Add audio
         </button>
         <div className="export-wrap">
           <button
             className="button primary"
-            disabled={busy || !clips.length}
+            disabled={busy || !hasMasterAudio}
             onClick={() => setExportMenu((v) => !v)}
             aria-expanded={exportMenu}
           >
@@ -782,7 +860,7 @@ export const Workspace = memo(function Workspace({
               </div>
             </div>
             <span className="master-details">
-              {clips.length} {clips.length === 1 ? "clip" : "clips"}
+              {clips.length + (project.soundMix?.placements.length ?? 0)} clips
               <span>·</span>
               <strong>{clock(duration, true)}</strong>
             </span>
@@ -806,14 +884,14 @@ export const Workspace = memo(function Workspace({
               <button
                 className="icon-button"
                 aria-label="Return to start"
-                disabled={!clips.length || busy}
+                disabled={!hasMasterAudio || busy}
                 onClick={() => player.seek(0)}
               >
                 <SkipBack size={16} />
               </button>
               <button
                 className="play-master"
-                disabled={!clips.length || busy}
+                disabled={!hasMasterAudio || busy}
                 aria-label={
                   player.playing && !player.previewId
                     ? "Pause master"
@@ -844,7 +922,7 @@ export const Workspace = memo(function Workspace({
               max={duration || 1}
               step="0.01"
               value={Math.min(player.position, duration)}
-              disabled={!clips.length || busy}
+              disabled={!hasMasterAudio || busy}
               aria-label="Seek master track"
               onChange={(e) => player.seek(Number(e.target.value))}
             />
@@ -878,18 +956,25 @@ export const Workspace = memo(function Workspace({
             </button>
             <button
               role="tab"
-              id={`manual-tab-${project.id}`}
-              aria-controls={`manual-panel-${project.id}`}
-              aria-selected={tab === "manual"}
-              className={tab === "manual" ? "active" : ""}
-              onClick={() => setTab("manual")}
+              id={`music-tab-${project.id}`}
+              aria-controls={`music-panel-${project.id}`}
+              aria-selected={tab === "music"}
+              className={tab === "music" ? "active" : ""}
+              onClick={() => {
+                setTab("music");
+                setLibraryTab(
+                  project.tracks.some((track) => track.role === "soundtrack")
+                    ? "soundtrack"
+                    : "music",
+                );
+              }}
             >
-              <SlidersHorizontal size={16} />
-              Manual edit
+              <Music2 size={16} />
+              Music &amp; Sound Track
             </button>
           </div>
           <div className="edit-actions">
-            {!!project.tracks.length && (
+            {!!project.groups.length && tab === "choices" && (
               <button
                 className={`button ${hasUnanalyzed ? "primary" : "secondary"} align-button`}
                 disabled={busy}
@@ -996,18 +1081,18 @@ export const Workspace = memo(function Workspace({
           </div>
         ) : (
           <section
-            className="editor-content"
+            className={`editor-content ${tab === "music" ? "music-editor-content" : ""}`}
             ref={editorViewport}
             id={
               tab === "choices"
                 ? `choices-panel-${project.id}`
-                : `manual-panel-${project.id}`
+                : `music-panel-${project.id}`
             }
             role="tabpanel"
             aria-labelledby={
               tab === "choices"
                 ? `choices-tab-${project.id}`
-                : `manual-tab-${project.id}`
+                : `music-tab-${project.id}`
             }
           >
             {tab === "choices" ? (
@@ -1082,97 +1167,22 @@ export const Workspace = memo(function Workspace({
                   <div className="no-results">
                     {query
                       ? "No sentences match your search."
-                      : "Your takes are ready. Group sentences to compare variations, or start with Manual edit."}
+                      : "Your takes are ready. Group sentences to compare variations."}
                   </div>
                 )}
               </>
             ) : (
               <>
-                <div className="manual-toolbar">
-                  <div className="tool-switch">
-                    <button
-                      className={!cutTool ? "active" : ""}
-                      onClick={() => setCutTool(false)}
-                      title="Click segments to include or mute"
-                    >
-                      <Volume2 size={14} />
-                      Select
-                    </button>
-                    <button
-                      className={cutTool ? "active" : ""}
-                      onClick={() => setCutTool(true)}
-                      title="Cut a segment at the click position · C"
-                    >
-                      <Scissors size={14} />
-                      Cut<span className="key">C</span>
-                    </button>
-                  </div>
-                  <label className="zoom">
-                    Zoom
-                    <input
-                      aria-label="Timeline zoom"
-                      type="range"
-                      min="1"
-                      max="6"
-                      step="0.5"
-                      value={zoom}
-                      onChange={(e) => setZoom(Number(e.target.value))}
-                    />
-                    <span>{zoom.toFixed(1)}×</span>
-                  </label>
-                  <span className="manual-legend">
-                    <span className="dot green" />
-                    In master
-                    <span className="dot gray" />
-                    Muted
-                  </span>
-                </div>
-                <div
-                  className="manual-drop-region"
-                  data-full-take-drop="manual"
-                >
-                  {dropTarget?.kind === "take" &&
-                    dropTarget.zone === "manual" && <TakeDropOverlay />}
-                  <div className="tracks-scroll">
-                    <div
-                      className="manual-tracks"
-                      style={{ minWidth: `${zoom * 100}%` }}
-                    >
-                      {project.tracks.map((track) => (
-                        <ManualTrack
-                          key={track.id}
-                          track={track}
-                          project={project}
-                          cutTool={cutTool}
-                          selected={selected}
-                          previewId={player.previewId}
-                          disabled={busy}
-                          onPreview={player.preview}
-                          onSelect={setSelected}
-                          onToggle={toggle}
-                          onCut={cut}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                </div>
-                {selectedSegment && (
-                  <SegmentInspector
-                    key={`${selectedSegment.id}:${selectedSegment.start}:${selectedSegment.end}`}
-                    segment={selectedSegment}
-                    track={project.tracks.find(
-                      (t) => t.id === selectedSegment.trackId,
-                    )!}
-                    disabled={busy}
-                    onPreview={() => player.preview(selectedSegment)}
-                    onTrim={(start, end) =>
-                      edit((p) =>
-                        trimSegment(p, selectedSegment.id, start, end),
-                      )
-                    }
-                    onClose={() => setSelected(null)}
-                  />
+                {dropTarget?.kind === "take" && dropTarget.zone === "music" && (
+                  <TakeDropOverlay />
                 )}
+                <MusicWorkspace
+                  project={project}
+                  busy={busy}
+                  position={player.position}
+                  onSeek={player.seek}
+                  onEdit={edit}
+                />
               </>
             )}
           </section>
@@ -1185,6 +1195,13 @@ export const Workspace = memo(function Workspace({
             <h2>Drop audio to import</h2>
           </div>
         </div>
+      )}
+      {active && pendingImport && (
+        <ImportKindDialog
+          key={pendingImport.id}
+          track={pendingImport}
+          onChoose={chooseImportKind}
+        />
       )}
       {active && settings && (
         <Settings
@@ -1296,8 +1313,9 @@ export const Workspace = memo(function Workspace({
               <li>
                 <strong>Polish and export.</strong>
                 <p>
-                  Use Manual edit to split, trim, or mute sections. Save your
-                  project with ⌘S. Export a WAV or MP3 when it sounds right.
+                  Layer music and sound effects in Music &amp; Sound Track. Save
+                  your project with ⌘S. Export a WAV or MP3 when it sounds
+                  right.
                 </p>
               </li>
             </ol>
@@ -1309,7 +1327,7 @@ export const Workspace = memo(function Workspace({
                 <kbd>⌘ Z</kbd>Undo
               </span>
               <span>
-                <kbd>C</kbd>Cut tool
+                <kbd>⌘ S</kbd>Save project
               </span>
             </div>
             <button
@@ -1377,7 +1395,9 @@ const SentenceRow = memo(function SentenceRow({
   const activeTracks = variations.filter((v) => v.parts.some((s) => s.enabled));
   const skipped = activeTracks.length === 0;
   const eligibleTakes = project.tracks.filter(
-    (track) => !track.sentenceGroupId || track.sentenceGroupId === group.id,
+    (track) =>
+      (track.role ?? "voiceover") === "voiceover" &&
+      (!track.sentenceGroupId || track.sentenceGroupId === group.id),
   ).length;
   return (
     <article
@@ -1444,7 +1464,12 @@ const SentenceRow = memo(function SentenceRow({
                 className="icon-button"
                 aria-label={`Decrease sentence ${index + 1} speed`}
                 disabled={disabled || (group.speed ?? 1) <= 0.5}
-                onClick={() => onSpeed(group.id, (group.speed ?? 1) - 0.25)}
+                onClick={() =>
+                  onSpeed(
+                    group.id,
+                    Math.round(((group.speed ?? 1) - 0.01) * 100) / 100,
+                  )
+                }
               >
                 <Minus size={12} />
               </button>
@@ -1452,8 +1477,13 @@ const SentenceRow = memo(function SentenceRow({
               <button
                 className="icon-button"
                 aria-label={`Increase sentence ${index + 1} speed`}
-                disabled={disabled || (group.speed ?? 1) >= 2.5}
-                onClick={() => onSpeed(group.id, (group.speed ?? 1) + 0.25)}
+                disabled={disabled || (group.speed ?? 1) >= 2}
+                onClick={() =>
+                  onSpeed(
+                    group.id,
+                    Math.round(((group.speed ?? 1) + 0.01) * 100) / 100,
+                  )
+                }
               >
                 <Plus size={12} />
               </button>
@@ -1534,211 +1564,6 @@ const SentenceRow = memo(function SentenceRow({
   );
 });
 
-const ManualTrack = memo(function ManualTrack({
-  track,
-  project,
-  cutTool,
-  selected,
-  previewId,
-  disabled,
-  onPreview,
-  onSelect,
-  onToggle,
-  onCut,
-}: {
-  track: AudioTrack;
-  project: MixProject;
-  cutTool: boolean;
-  selected: string | null;
-  previewId: string | null;
-  disabled: boolean;
-  onPreview: (s: AudioSegment) => void;
-  onSelect: (id: string) => void;
-  onToggle: (id: string) => void;
-  onCut: (id: string, time: number) => void;
-}) {
-  const segments = project.segments.filter((s) => s.trackId === track.id);
-  return (
-    <div className="manual-track">
-      <div className="manual-track-heading">
-        <span className="track-indicator" style={{ background: track.color }} />
-        <strong>{track.name}</strong>
-        <span>{clock(track.duration, true)}</span>
-        <button
-          className="icon-button"
-          disabled={disabled}
-          aria-label={`Preview full ${track.name}`}
-          onClick={() =>
-            onPreview({
-              id: track.id,
-              trackId: track.id,
-              groupId: "",
-              start: 0,
-              end: track.duration,
-              text: track.name,
-              enabled: false,
-            })
-          }
-        >
-          {previewId === track.id ? <Pause size={14} /> : <Play size={14} />}
-        </button>
-      </div>
-      <div className="manual-ruler">
-        {Array.from({ length: 9 }, (_, i) => (
-          <span key={i}>{clock((track.duration * i) / 8)}</span>
-        ))}
-      </div>
-      <div className={`source-lane ${cutTool ? "cut-cursor" : ""}`}>
-        <Waveform peaks={track.peaks} color="#ced3d0" bars={220} />
-        {segments.map((segment) => (
-          <button
-            className={`source-segment ${segment.enabled && !segment.excluded ? "enabled" : "muted"} ${selected === segment.id ? "inspected" : ""}`}
-            style={
-              {
-                left: `${(segment.start / track.duration) * 100}%`,
-                width: `${((segment.end - segment.start) / track.duration) * 100}%`,
-                "--take-color": track.color,
-              } as React.CSSProperties
-            }
-            key={segment.id}
-            disabled={disabled}
-            aria-label={`${segment.enabled && !segment.excluded ? "Mute" : "Include"} ${segment.text || "segment"} at ${clock(segment.start)}`}
-            aria-pressed={segment.enabled && !segment.excluded}
-            onClick={(e) => {
-              if (cutTool) {
-                const fraction =
-                  (e.clientX - e.currentTarget.getBoundingClientRect().left) /
-                  e.currentTarget.clientWidth;
-                onCut(
-                  segment.id,
-                  segment.start + fraction * (segment.end - segment.start),
-                );
-              } else {
-                onToggle(segment.id);
-                onSelect(segment.id);
-              }
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              onSelect(segment.id);
-            }}
-            title={
-              cutTool
-                ? "Click to split here"
-                : `${segment.enabled && !segment.excluded ? "In master · click to mute" : "Muted · click to include"} · Right-click for trim controls`
-            }
-          >
-            <span className="source-segment-text">
-              {segment.enabled && !segment.excluded ? (
-                <Volume2 size={11} />
-              ) : (
-                <VolumeX size={11} />
-              )}
-              <span>{segment.text || "Audio segment"}</span>
-            </span>
-            <Waveform
-              peaks={track.peaks}
-              start={segment.start / track.duration}
-              end={segment.end / track.duration}
-              bars={Math.max(
-                8,
-                Math.round(
-                  ((segment.end - segment.start) / track.duration) * 210,
-                ),
-              )}
-            />
-            <span className="segment-start">{clock(segment.start, true)}</span>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-});
-
-function SegmentInspector({
-  segment,
-  track,
-  disabled,
-  onPreview,
-  onTrim,
-  onClose,
-}: {
-  segment: AudioSegment;
-  track: AudioTrack;
-  disabled: boolean;
-  onPreview: () => void;
-  onTrim: (start: number, end: number) => void;
-  onClose: () => void;
-}) {
-  const [start, setStart] = useState(segment.start.toFixed(3));
-  const [end, setEnd] = useState(segment.end.toFixed(3));
-  // Display milliseconds without rounding an untouched boundary into its neighbour.
-  const startValue =
-    start === segment.start.toFixed(3) ? segment.start : Number(start);
-  const endValue = end === segment.end.toFixed(3) ? segment.end : Number(end);
-  const valid =
-    Number.isFinite(startValue) &&
-    Number.isFinite(endValue) &&
-    startValue >= 0 &&
-    endValue > startValue &&
-    endValue <= track.duration;
-  return (
-    <div className="segment-inspector">
-      <div>
-        <span className="eyebrow">SELECTED SEGMENT</span>
-        <strong>{track.name}</strong>
-      </div>
-      <label>
-        Start{" "}
-        <input
-          type="number"
-          aria-label="Segment start seconds"
-          min="0"
-          max={track.duration}
-          step="0.01"
-          value={start}
-          onChange={(e) => setStart(e.target.value)}
-        />
-        <span>s</span>
-      </label>
-      <label>
-        End{" "}
-        <input
-          type="number"
-          aria-label="Segment end seconds"
-          min="0"
-          max={track.duration}
-          step="0.01"
-          value={end}
-          onChange={(e) => setEnd(e.target.value)}
-        />
-        <span>s</span>
-      </label>
-      <button
-        className="icon-button"
-        aria-label="Preview selected segment"
-        disabled={disabled || segment.excluded}
-        onClick={onPreview}
-      >
-        <Play size={15} />
-      </button>
-      <button
-        className="button secondary"
-        disabled={disabled || !valid}
-        onClick={() => onTrim(startValue, endValue)}
-      >
-        Apply trim
-      </button>
-      <button
-        className="icon-button"
-        aria-label="Close segment controls"
-        onClick={onClose}
-      >
-        <X size={16} />
-      </button>
-    </div>
-  );
-}
 function message(error: unknown): string {
   return error instanceof Error
     ? error.message.replace(

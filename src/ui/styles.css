@@ -2761,3 +2761,190 @@ kbd {
 .sentence-row.is-playing .sentence-heading h3 {
   color: var(--green-text);
 }
+
+.library-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  padding: 4px;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  margin: 6px 0 18px;
+}
+.library-tabs button {
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  min-height: 36px;
+  background: transparent;
+  color: var(--secondary);
+}
+.library-tabs button.active {
+  background: var(--surface);
+  color: var(--green-text);
+  box-shadow: 0 1px 4px var(--shadow);
+}
+.import-kind-modal {
+  width: min(680px, 94vw);
+}
+.import-kind-modal header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 15px;
+}
+.import-kind-modal h2 {
+  margin-top: 6px;
+}
+.eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--green-text);
+  font-weight: 800;
+}
+.import-audition {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px;
+  background: var(--surface-soft);
+  margin: 18px 0;
+}
+.import-audition > strong {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.import-audition > input {
+  width: 100%;
+  margin-top: 12px;
+}
+.import-wave {
+  position: relative;
+  height: 70px;
+  color: var(--green-text);
+  margin: 10px 0;
+  overflow: hidden;
+}
+.import-wave > svg {
+  width: 100%;
+  height: 100%;
+}
+.import-wave > span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--green);
+}
+.import-transport {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.import-transport > span {
+  font-family: "Geist Mono", monospace;
+  font-size: 11px;
+}
+.import-transport > label {
+  margin-left: auto;
+  color: var(--secondary);
+  font-size: 11px;
+}
+.import-transport select {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  padding: 4px;
+  margin-left: 6px;
+}
+.import-kind-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.import-kind-option {
+  position: relative;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 20px 16px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 12px;
+}
+.import-kind-option.selected {
+  border-color: var(--green-line);
+  background: var(--green-soft);
+  box-shadow: 0 0 0 1px var(--green-line);
+}
+.import-kind-option small {
+  color: var(--secondary);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.kind-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 13px;
+  background: var(--surface-soft);
+  color: var(--green-text);
+}
+.kind-soundtrack {
+  color: var(--purple-text);
+  background: var(--purple-bg);
+}
+.kind-music {
+  color: var(--warning-text);
+  background: var(--warning-bg);
+}
+.kind-check {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+}
+.selected .kind-check {
+  background: var(--green);
+  color: var(--on-green);
+  border-color: var(--green);
+}
+.import-kind-modal footer {
+  margin-top: 24px;
+}
+.master-clips.has-mix-beds .master-clip {
+  height: calc(100% - 30px);
+}
+.master-bed {
+  position: absolute;
+  bottom: 15px;
+  height: 15px;
+  pointer-events: none;
+  border: 1px solid currentColor;
+  overflow: hidden;
+}
+.master-bed-soundtrack {
+  bottom: 0;
+}
+.master-bed svg {
+  width: 100%;
+  height: 100%;
+}
+.music-editor-content {
+  overflow: hidden;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}

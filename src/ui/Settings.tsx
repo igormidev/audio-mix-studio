@@ -159,36 +159,60 @@ export function Settings({
               Recheck
             </button>
           </div>
-          {(["whisperx", "codex", "ffmpeg"] as const).map((key) => (
-            <div className="dependency" key={key}>
-              <span
-                className={`dependency-symbol ${status?.[key].available ? "ready" : ""}`}
-              >
-                {status?.[key].available ? (
-                  <Check size={15} />
-                ) : (
-                  <Download size={15} />
-                )}
-              </span>
-              <div>
-                <strong>
-                  {key === "whisperx"
-                    ? "WhisperX"
-                    : key === "codex"
-                      ? "Codex CLI"
-                      : "FFmpeg"}
-                </strong>
-                <p>{status?.[key].detail ?? "Checking installation…"}</p>
+          {(["whisperx", "codex", "ffmpeg", "soundtouch"] as const).map(
+            (key) => (
+              <div className="dependency" key={key}>
+                <span
+                  className={`dependency-symbol ${status?.[key]?.available ? "ready" : ""}`}
+                >
+                  {status?.[key]?.available ? (
+                    <Check size={15} />
+                  ) : (
+                    <Download size={15} />
+                  )}
+                </span>
+                <div>
+                  <strong>
+                    {key === "whisperx"
+                      ? "WhisperX"
+                      : key === "codex"
+                        ? "Codex CLI"
+                        : key === "soundtouch"
+                          ? "SoundTouch tempo"
+                          : "FFmpeg"}
+                  </strong>
+                  <p>{status?.[key]?.detail ?? "Checking installation…"}</p>
+                </div>
+                <button
+                  className="icon-button"
+                  aria-label={`Open ${key} installation guide`}
+                  onClick={() => void window.studio.openExternal(key)}
+                >
+                  <ExternalLink size={15} />
+                </button>
               </div>
+            ),
+          )}
+          {status && !status.soundtouch?.available && (
+            <div className="setup-instructions">
+              <p>Give this prompt to your AI assistant:</p>
+              <textarea
+                readOnly
+                aria-label="SoundTouch installation prompt"
+                value="Install the Homebrew sound-touch package on this Mac (brew install sound-touch). Verify soundstretch runs, then recheck Local tools in Audio Mix Studio. Preserve other app settings and model caches."
+              />
               <button
-                className="icon-button"
-                aria-label={`Open ${key} installation guide`}
-                onClick={() => void window.studio.openExternal(key)}
+                className="button secondary"
+                onClick={() =>
+                  void navigator.clipboard.writeText(
+                    "Install the Homebrew sound-touch package on this Mac (brew install sound-touch). Verify soundstretch runs, then recheck Local tools in Audio Mix Studio. Preserve other app settings and model caches.",
+                  )
+                }
               >
-                <ExternalLink size={15} />
+                Copy installation prompt
               </button>
             </div>
-          ))}
+          )}
           <p className="privacy-note">
             Audio stays on your Mac. Grouping sends transcript text to your
             signed-in Codex account.

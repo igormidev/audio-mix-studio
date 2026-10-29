@@ -28,6 +28,47 @@ export interface AudioTrack {
   transcript?: Transcript;
   /** A local replacement choice for this sentence, never a complete-script take. */
   sentenceGroupId?: string;
+  role?: AudioRole;
+}
+export type AudioRole = "voiceover" | "music" | "soundtrack";
+export type FadeCurve =
+  "linear" | "ease-in" | "ease-out" | "s-curve" | "custom";
+export interface MixClipSettings {
+  speed: number;
+  volume: number;
+  fadeInMs: number;
+  fadeOutMs: number;
+  fadeInStartMs: number;
+  fadeOutStartMs: number;
+  fadeInCurve: FadeCurve;
+  fadeOutCurve: FadeCurve;
+  fadeInPower: number;
+  fadeOutPower: number;
+}
+/** A source-relative boundary. Settings apply until the next boundary. */
+export interface MixKeyframe {
+  id: string;
+  time: number;
+  settings: MixClipSettings;
+}
+export interface MixLane {
+  id: string;
+  name: string;
+  kind: AudioRole;
+}
+export interface MixPlacement {
+  id: string;
+  laneId: string;
+  trackId: string;
+  start: number;
+  end: number;
+  offset: number;
+  settings: MixClipSettings;
+  keyframes: MixKeyframe[];
+}
+export interface SoundMix {
+  lanes: MixLane[];
+  placements: MixPlacement[];
 }
 export interface AudioSegment {
   id: string;
@@ -83,7 +124,9 @@ export interface MixProject {
   jointOverrides?: Record<string, Partial<JointSettings>>;
   codex?: CodexSelection;
   updatedAt: string;
+  soundMix?: SoundMix;
 }
+export interface MixRenderClip extends MasterClip, Partial<MixClipSettings> {}
 export type StudioTheme = "light" | "dark" | "system";
 export interface WorkspaceSession {
   version: 1;
@@ -114,6 +157,7 @@ export interface AlignmentResult {
   groups: AnalysisGroup[];
 }
 export interface DependencyStatus {
+  soundtouch?: { available: boolean; path?: string; detail: string };
   codex: { available: boolean; path?: string; detail: string };
   ffmpeg: { available: boolean; path?: string; detail: string };
   whisperx: { available: boolean; path?: string; detail: string };
@@ -147,7 +191,15 @@ export interface StudioAPI {
     start: number,
     end: number,
     speed?: number,
+    logicalSource?: { start: number; end: number },
+    projectId?: string,
   ): Promise<ArrayBuffer>;
+  mixSlice(
+    project: MixProject,
+    start: number,
+    end: number,
+  ): Promise<ArrayBuffer>;
+  cancelPlayback(projectId: string): Promise<void>;
   pathForFile(file: File): string;
   analyze(project: MixProject): Promise<MixProject>;
   setupTranscription(
@@ -165,7 +217,9 @@ export interface StudioAPI {
   ): Promise<string | null>;
   exportAlignment(project: MixProject): Promise<string | null>;
   demoProject(projectId?: string): Promise<MixProject>;
-  openExternal(target: "codex" | "ffmpeg" | "whisperx"): Promise<void>;
+  openExternal(
+    target: "codex" | "ffmpeg" | "whisperx" | "soundtouch",
+  ): Promise<void>;
   onProgress(
     listener: (progress: OperationProgress | null) => void,
   ): () => void;

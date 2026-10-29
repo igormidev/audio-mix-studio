@@ -18,6 +18,7 @@ import {
 } from "../domain/project";
 import { clock, secondsLabel } from "./format";
 import { Waveform } from "./Waveform";
+import { placementRenderClips } from "../domain/soundMix";
 
 interface CutSelection {
   pointerId: number;
@@ -59,8 +60,30 @@ export const MasterTimeline = memo(function MasterTimeline({
   onRestore: (segmentId: string) => void;
 }) {
   const clips = useMemo(() => masterTimelineClips(project), [project]);
-  const visualDuration = useMemo(
+  const narrationVisualDuration = useMemo(
     () => masterTimelineDuration(project),
+    [project],
+  );
+  const narrationDuration = clips.reduce(
+    (end, clip) =>
+      Math.max(end, clip.playbackOffset + (clip.excluded ? 0 : clip.duration)),
+    0,
+  );
+  const visualDuration =
+    narrationVisualDuration + Math.max(0, duration - narrationDuration);
+  const toVisual = (time: number) =>
+    time > narrationDuration
+      ? narrationVisualDuration + time - narrationDuration
+      : masterToTimelineTime(clips, time);
+  const toPlayback = (time: number) =>
+    time > narrationVisualDuration
+      ? narrationDuration + time - narrationVisualDuration
+      : timelineToMasterTime(clips, time);
+  const beds = useMemo(
+    () =>
+      project.soundMix?.placements.flatMap((placement) =>
+        placementRenderClips(project, placement),
+      ) ?? [],
     [project],
   );
   const tracks = useMemo(
@@ -74,7 +97,7 @@ export const MasterTimeline = memo(function MasterTimeline({
       ),
     [project.groups],
   );
-  const visualPosition = masterToTimelineTime(clips, position);
+  const visualPosition = toVisual(position);
   const scroll = useRef<HTMLDivElement>(null);
   const lane = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
@@ -321,7 +344,7 @@ export const MasterTimeline = memo(function MasterTimeline({
           )}
         </div>
         <div
-          className="master-clips"
+          className={`master-clips${beds.length ? " has-mix-beds" : ""}`}
           ref={lane}
           onPointerDown={(event) => {
             if (
@@ -385,7 +408,7 @@ export const MasterTimeline = memo(function MasterTimeline({
           onLostPointerCapture={clearSelection}
           onClick={(event) => {
             if (mode === "cut" || disabled || !active || !duration) return;
-            onSeek(timelineToMasterTime(clips, visualTimeAt(event.clientX)));
+            onSeek(toPlayback(visualTimeAt(event.clientX)));
           }}
         >
           {clips.length ? (
@@ -492,6 +515,29 @@ export const MasterTimeline = memo(function MasterTimeline({
               <span>No clips selected</span>
             </div>
           )}
+          {beds.map((clip) => {
+            const track = tracks.get(clip.trackId)!;
+            return (
+              <div
+                key={clip.id}
+                className={`master-bed master-bed-${track.role}`}
+                title={`${track.name} · ${clip.speed ?? 1}×`}
+                style={{
+                  left: `${(toVisual(clip.offset) / visualDuration) * 100}%`,
+                  width: `${((toVisual(clip.offset + clip.duration) - toVisual(clip.offset)) / visualDuration) * 100}%`,
+                  color: track.color,
+                  background: `${track.color}28`,
+                }}
+              >
+                <Waveform
+                  peaks={track.peaks}
+                  start={clip.start / track.duration}
+                  end={clip.end / track.duration}
+                  bars={80}
+                />
+              </div>
+            );
+          })}
           {selection && (
             <div
               className="master-cut-selection"
@@ -507,7 +553,7 @@ export const MasterTimeline = memo(function MasterTimeline({
               <span>{secondsLabel(selectionEnd - selectionStart)}</span>
             </div>
           )}
-          {!!clips.length && (
+          {(!!clips.length || !!beds.length) && (
             <div
               className="playhead"
               data-position={visualPosition}

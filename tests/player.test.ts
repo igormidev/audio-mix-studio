@@ -9,6 +9,7 @@ import {
   setJointDefaults,
 } from "../src/domain/project";
 import type { MixProject } from "../src/shared/types";
+import { addMixPlacement, appendLibraryTracks } from "../src/domain/soundMix";
 import {
   deinterleavePCM,
   edgeFadeSeconds,
@@ -106,6 +107,11 @@ class TestContext {
 }
 const frames = new Map<number, FrameRequestCallback>();
 let frameId = 0;
+const mixSlice =
+  vi.fn<
+    (project: MixProject, start: number, end: number) => Promise<ArrayBuffer>
+  >();
+const cancelPlayback = vi.fn<(projectId: string) => Promise<void>>();
 const audioSlice =
   vi.fn<
     (
@@ -115,6 +121,20 @@ const audioSlice =
       speed?: number,
     ) => Promise<ArrayBuffer>
   >();
+const audioSliceWithContext = vi.fn(
+  (
+    id: string,
+    start: number,
+    end: number,
+    speed?: number,
+    _logicalSource?: { start: number; end: number },
+    _projectId?: string,
+  ) => {
+    void _logicalSource;
+    void _projectId;
+    return audioSlice(id, start, end, speed);
+  },
+);
 function pcm(seconds: number): ArrayBuffer {
   return new ArrayBuffer(Math.round(seconds * PCM_SAMPLE_RATE) * 8);
 }
@@ -164,12 +184,21 @@ beforeEach(() => {
   TestContext.instances = [];
   frames.clear();
   frameId = 0;
+  mixSlice.mockReset();
+  mixSlice.mockImplementation((_project, start, end) =>
+    Promise.resolve(pcm(end - start)),
+  );
+  cancelPlayback.mockReset();
+  cancelPlayback.mockResolvedValue(undefined);
+  audioSliceWithContext.mockClear();
   audioSlice.mockReset();
   audioSlice.mockImplementation((_track, start, end, speed = 1) =>
     Promise.resolve(pcm((end - start) / speed)),
   );
   vi.stubGlobal("AudioContext", TestContext);
-  vi.stubGlobal("window", { studio: { audioSlice } });
+  vi.stubGlobal("window", {
+    studio: { audioSlice: audioSliceWithContext, mixSlice, cancelPlayback },
+  });
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
     frames.set(++frameId, callback);
     return frameId;
@@ -184,7 +213,10 @@ afterEach(() => {
 
 describe("precise playback planning", () => {
   it("keeps output-frame totals exact for every supported speed across long chunks", () => {
-    for (const speed of [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5]) {
+    for (const speed of [
+      0.5, 0.51, 0.73, 0.75, 0.99, 1, 1.01, 1.25, 1.37, 1.5, 1.75, 1.99, 2,
+      2.25, 2.5,
+    ]) {
       const chunks = planPlayback([
         {
           id: "long",
@@ -304,6 +336,69 @@ describe("precise playback planning", () => {
 });
 
 describe("Web Audio playback scheduling", () => {
+  it("plays synchronized mixed chunks beyond the narration and cancels stale mix work", async () => {
+    let p = source();
+    p = appendLibraryTracks(
+      p,
+      [{ ...p.tracks[0], id: "music", duration: 25 }],
+      "music",
+    );
+    p = addMixPlacement(p, "music-1", "music", 0);
+    const test = runner(p);
+    test.render().playMaster();
+    await settle();
+    expect(mixSlice.mock.calls.map((call) => call.slice(1))).toEqual([
+      [0, 20],
+      [20, 25],
+    ]);
+    expect(audioSlice).not.toHaveBeenCalled();
+    const context = TestContext.instances[0];
+    expect(context.sources[0].start).toHaveBeenCalledWith(0.035, 0, 20);
+    expect(context.sources[1].start).toHaveBeenCalledWith(20.035, 0, 5);
+    test.render().stop();
+    expect(cancelPlayback).toHaveBeenCalledWith(p.id);
+    test.render().seek(23);
+    test.render().playMaster();
+    await settle();
+    expect(mixSlice).toHaveBeenLastCalledWith(p, 23, 25);
+    test.render().stop();
+    const slow = deferred();
+    mixSlice.mockReturnValueOnce(slow.promise);
+    test.render().seek(22);
+    test.render().playMaster();
+    await settle();
+    test.render().stop();
+    slow.reject(new Error("Cancelled mix work"));
+    await settle();
+    expect(test.errors).not.toHaveBeenCalled();
+  });
+  it("owns and cancels preparation of a long pitch-preserving sentence", async () => {
+    let p = source();
+    p = {
+      ...p,
+      tracks: p.tracks.map((track) => ({ ...track, duration: 130 })),
+      segments: p.segments.map((segment) => ({ ...segment, end: 130 })),
+    };
+    p = setGroupSpeed(p, p.groups[0].id, 1.37);
+    const slow = deferred();
+    audioSlice.mockReturnValue(slow.promise);
+    const test = runner(p);
+    test.render().preview(p.segments[0]);
+    await settle();
+    expect(audioSliceWithContext).toHaveBeenCalledWith(
+      "a",
+      0,
+      expect.any(Number),
+      1.37,
+      { start: 0, end: 130 },
+      p.id,
+    );
+    test.render().stop();
+    expect(cancelPlayback).toHaveBeenCalledWith(p.id);
+    slow.reject(new Error("Cancelled original tempo preparation"));
+    await settle();
+    expect(test.errors).not.toHaveBeenCalled();
+  });
   it("uses pitch-preserving sentence speed and schedules the joint pause exactly once", async () => {
     const original = source();
     let p = splitSegment(original, original.segments[0].id, 6);

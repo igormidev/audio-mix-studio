@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import {
   access,
@@ -16,8 +16,12 @@ import { constants } from "node:fs";
 import type {
   AudioTrack,
   MasterClip,
+  MixProject,
+  MixRenderClip,
+  FadeCurve,
   OperationProgress,
 } from "../src/shared/types";
+import { mixDuration, mixRenderClips } from "../src/domain/soundMix";
 
 export const AUDIO_EXTENSIONS = [
   "wav",
@@ -391,7 +395,189 @@ export function byteRange(
   return { start, end, partial: true };
 }
 
-/** Small exact PCM windows keep auditioning sample-accurate without decoding entire recordings. */
+interface TempoAsset {
+  filename: string;
+  startFrame: number;
+  frames: number;
+}
+const tempoTasks = new Map<
+  string,
+  { task: Promise<TempoAsset>; owner?: AbortSignal }
+>();
+
+async function tempoAsset(
+  store: MediaStore,
+  clip: Pick<MasterClip, "trackId" | "start" | "end" | "speed">,
+  signal?: AbortSignal,
+): Promise<TempoAsset> {
+  signal?.throwIfAborted();
+  if ((clip.speed ?? 1) === 1) return createTempoAsset(store, clip, signal);
+  const key = JSON.stringify([
+    store.root,
+    clip.trackId,
+    Math.round(clip.start * 48000),
+    Math.round(clip.end * 48000),
+    clip.speed,
+  ]);
+  const existing = tempoTasks.get(key);
+  if (existing) {
+    let abort: (() => void) | undefined;
+    try {
+      return await (signal
+        ? Promise.race([
+            existing.task,
+            new Promise<never>((_, reject) => {
+              abort = () => reject(new Error("Playback cancelled."));
+              signal.addEventListener("abort", abort, { once: true });
+              if (signal.aborted) abort();
+            }),
+          ])
+        : existing.task);
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (existing.owner?.aborted) return tempoAsset(store, clip, signal);
+      throw error;
+    } finally {
+      if (abort) signal?.removeEventListener("abort", abort);
+    }
+  }
+  const task = createTempoAsset(store, clip, signal).finally(() =>
+    tempoTasks.delete(key),
+  );
+  tempoTasks.set(key, { task, owner: signal });
+  return task;
+}
+
+/** SoundTouch tempo-only processing, the default Change Tempo engine in Audacity.
+ * Cached source intervals are shared by preview and export; pitch/rate are never changed.
+ */
+async function createTempoAsset(
+  store: MediaStore,
+  clip: Pick<MasterClip, "trackId" | "start" | "end" | "speed">,
+  signal?: AbortSignal,
+): Promise<{ filename: string; startFrame: number; frames: number }> {
+  const track = store.track(clip.trackId);
+  const speed = clip.speed ?? 1;
+  validatePlaybackSpeed(speed);
+  if (
+    ![clip.start, clip.end].every(Number.isFinite) ||
+    clip.start < 0 ||
+    clip.end <= clip.start ||
+    clip.end > track.duration + 1 / 48000
+  )
+    throw new Error("A selected clip has invalid audio boundaries.");
+  const start = Math.max(0, Math.round(clip.start * 48000));
+  const end = Math.min(
+    Math.round(track.duration * 48000),
+    Math.round(clip.end * 48000),
+  );
+  const frames = Math.round((end - start) / speed);
+  if (frames < 1) throw new Error("A selected clip has no audible samples.");
+  if (speed === 1)
+    return {
+      filename: store.filename(clip.trackId),
+      startFrame: start,
+      frames,
+    };
+  let soundstretch: string;
+  try {
+    soundstretch = await findBinary("soundstretch");
+  } catch {
+    throw new Error(
+      "SoundTouch is required for pitch-preserving speed. Install it with “brew install sound-touch”, then recheck Studio settings.",
+    );
+  }
+  const engine = await stat(soundstretch);
+  const key = createHash("sha256")
+    .update(
+      JSON.stringify([
+        "soundtouch-2-v1",
+        engine.size,
+        engine.mtimeMs,
+        clip.trackId,
+        start,
+        end,
+        speed,
+      ]),
+    )
+    .digest("hex");
+  const directory = path.join(store.root, "tempo-cache");
+  await mkdir(directory, { recursive: true });
+  const filename = path.join(directory, `${key}.wav`);
+  if (
+    await stat(filename)
+      .then((file) => file.isFile() && file.size >= frames * 8)
+      .catch(() => false)
+  )
+    return { filename, startFrame: 0, frames };
+  const scratch = path.join(directory, randomUUID());
+  const input = `${scratch}.input.wav`,
+    stretched = `${scratch}.stretch.wav`,
+    output = `${scratch}.out.wav`;
+  const ffmpeg = await findBinary("ffmpeg");
+  try {
+    await runProcess(
+      ffmpeg,
+      [
+        "-v",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+        (start / 48000).toFixed(9),
+        "-i",
+        store.filename(clip.trackId),
+        "-af",
+        `atrim=end_sample=${end - start},asetpts=PTS-STARTPTS`,
+        "-c:a",
+        "pcm_f32le",
+        input,
+      ],
+      { signal },
+    );
+    await runProcess(
+      soundstretch,
+      [input, stretched, `-tempo=${((speed - 1) * 100).toFixed(8)}`],
+      { signal },
+    );
+    await runProcess(
+      ffmpeg,
+      [
+        "-v",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        stretched,
+        "-af",
+        `apad=whole_len=${frames},atrim=end_sample=${frames}`,
+        "-c:a",
+        "pcm_f32le",
+        output,
+      ],
+      { signal },
+    );
+    signal?.throwIfAborted();
+    await rename(output, filename);
+    return { filename, startFrame: 0, frames };
+  } finally {
+    await Promise.all(
+      [input, stretched, output].map((file) => rm(file, { force: true })),
+    );
+  }
+}
+
+export function validatePlaybackSpeed(speed: number): void {
+  if (
+    !Number.isFinite(speed) ||
+    speed < 0.5 ||
+    speed > 2.5 ||
+    Math.abs(speed * 100 - Math.round(speed * 100)) > 0.000001
+  )
+    throw new Error("Audio speed must be 0.5×–2.5× in one-percent steps.");
+}
+
+/** Small exact PCM windows keep auditioning sample-accurate. */
 export async function decodeAudioSlice(
   store: MediaStore,
   id: string,
@@ -399,12 +585,12 @@ export async function decodeAudioSlice(
   end: number,
   signal?: AbortSignal,
   speed = 1,
+  logicalSource?: { start: number; end: number },
 ): Promise<ArrayBuffer> {
-  validatePlaybackSpeed(speed);
   const track = store.track(id);
   if (
     ![start, end].every(Number.isFinite) ||
-    start < -1 / 48000 ||
+    start < 0 ||
     end <= start ||
     end > track.duration + 1 / 48000 ||
     end - start > 120 + 1 / 48000
@@ -412,38 +598,48 @@ export async function decodeAudioSlice(
     throw new Error(
       "Preview intervals must be within the source and no longer than 120 seconds.",
     );
-  const startSample = Math.max(0, Math.round(start * 48000));
-  const endSample = Math.min(
-    Math.round(track.duration * 48000),
-    Math.round(end * 48000),
+  if (
+    logicalSource &&
+    (!Number.isFinite(logicalSource.start) ||
+      !Number.isFinite(logicalSource.end) ||
+      logicalSource.start < 0 ||
+      logicalSource.end > track.duration + 1 / 48000 ||
+      logicalSource.start > start ||
+      logicalSource.end < end)
+  )
+    throw new Error("Invalid logical preview source.");
+  const asset = await tempoAsset(
+    store,
+    {
+      trackId: id,
+      start: logicalSource?.start ?? start,
+      end: logicalSource?.end ?? end,
+      speed,
+    },
+    signal,
   );
-  if (endSample <= startSample)
-    throw new Error("A preview must contain at least one audio sample.");
+  const outputSkip = logicalSource
+    ? Math.round(
+        (Math.round(start * 48000) - Math.round(logicalSource.start * 48000)) /
+          speed,
+      )
+    : 0;
+  const outputFrames = Math.round(
+    (Math.round(end * 48000) - Math.round(start * 48000)) / speed,
+  );
   const ffmpeg = await findBinary("ffmpeg");
-  const sourceFrames = endSample - startSample;
-  const outputFrames = Math.round(sourceFrames / speed);
   const result = await runProcess(
     ffmpeg,
     [
-      "-hide_banner",
-      "-loglevel",
+      "-v",
       "error",
       "-nostdin",
       "-ss",
-      (startSample / 48000).toFixed(9),
-      "-t",
-      (sourceFrames / 48000).toFixed(9),
+      ((asset.startFrame + outputSkip) / 48000).toFixed(9),
       "-i",
-      store.filename(id),
+      asset.filename,
       "-af",
-      [
-        `atrim=end_sample=${sourceFrames}`,
-        "asetpts=PTS-STARTPTS",
-        "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo",
-        ...tempoFilters(speed),
-        `apad=whole_len=${outputFrames}`,
-        `atrim=end_sample=${outputFrames}`,
-      ].join(","),
+      `atrim=end_sample=${outputFrames},asetpts=PTS-STARTPTS`,
       "-ar",
       "48000",
       "-ac",
@@ -452,152 +648,196 @@ export async function decodeAudioSlice(
       "f32le",
       "-",
     ],
-    {
-      signal,
-      maxBytes: outputFrames * 2 * 4 + 8192,
-      timeoutMs: 60_000,
-    },
+    { signal, maxBytes: outputFrames * 8 + 8192, timeoutMs: 60_000 },
   );
   return Uint8Array.from(result.stdout).buffer;
 }
 
-function validatePlaybackSpeed(speed: number): void {
-  if (
-    !Number.isFinite(speed) ||
-    speed < 0.5 ||
-    speed > 2.5 ||
-    !Number.isInteger(speed * 4)
-  )
-    throw new Error("Audio speed must be 0.5×–2.5× in 0.25× steps.");
+function curveExpression(
+  value: string,
+  curve: FadeCurve | undefined,
+  power: number,
+): string {
+  if (curve === "ease-in") return `pow(${value},2)`;
+  if (curve === "ease-out") return `(1-pow(1-${value},2))`;
+  if (curve === "s-curve") return `(${value}*${value}*(3-2*${value}))`;
+  if (curve === "custom") return `pow(${value},${power})`;
+  return value;
 }
 
-/** Chain atempo above 2× to retain speech pitch without skipped analysis windows. */
-function tempoFilters(speed: number): string[] {
-  if (speed === 1) return [];
-  // Input seeking and full-source atrim can produce different AVFrame sizes.
-  // atempo's WSOLA overlap decisions are frame-sensitive in some FFmpeg builds;
-  // reframe both paths identically without padding or dropping source samples.
-  return [
-    "asetnsamples=n=1024:p=0",
-    ...(speed > 2 ? ["atempo=2", `atempo=${speed / 2}`] : [`atempo=${speed}`]),
-  ];
-}
-
-function clipFades(
+function gainExpression(
+  clip: MixRenderClip,
   duration: number,
-  fadeInMs: number,
-  fadeOutMs: number,
-): { fadeIn: number; fadeOut: number } {
+  fadeMs: number,
+): string {
+  const volume = clip.volume ?? 1;
+  const inStart = (clip.fadeInStartMs ?? 0) / 1000;
+  const outStart = (clip.fadeOutStartMs ?? 0) / 1000;
+  let fadeIn = (clip.fadeInMs ?? fadeMs) / 1000;
+  let fadeOut = (clip.fadeOutMs ?? fadeMs) / 1000;
+  const inPower = clip.fadeInPower ?? 1,
+    outPower = clip.fadeOutPower ?? 1;
   if (
-    ![fadeInMs, fadeOutMs].every(
-      (value) => Number.isFinite(value) && value >= 0 && value <= 5000,
-    )
+    ![volume, inStart, outStart, fadeIn, fadeOut, inPower, outPower].every(
+      Number.isFinite,
+    ) ||
+    volume < 0 ||
+    volume > 2 ||
+    Math.min(inStart, outStart, fadeIn, fadeOut) < 0 ||
+    inPower < 0.1 ||
+    inPower > 10 ||
+    outPower < 0.1 ||
+    outPower > 10
   )
-    throw new Error("Clip fades must be between 0 and 5000 milliseconds.");
-  const total = (fadeInMs + fadeOutMs) / 1000;
-  const factor = total > duration ? duration / total : 1;
-  return {
-    fadeIn: (fadeInMs / 1000) * factor,
-    fadeOut: (fadeOutMs / 1000) * factor,
-  };
+    throw new Error("Invalid clip volume or fade settings.");
+  // Preserve narration's independent edge-fade contract, including short clips.
+  if (
+    !clip.fadeInStartMs &&
+    !clip.fadeOutStartMs &&
+    fadeIn + fadeOut > duration
+  ) {
+    const factor = duration / (fadeIn + fadeOut);
+    fadeIn *= factor;
+    fadeOut *= factor;
+  }
+  const a = fadeIn
+    ? curveExpression(
+        `clip((t-${inStart})/${fadeIn},0,1)`,
+        clip.fadeInCurve,
+        inPower,
+      )
+    : "1";
+  const b = fadeOut
+    ? `(1-${curveExpression(
+        `(1-clip((${duration - outStart}-t)/${fadeOut},0,1))`,
+        clip.fadeOutCurve,
+        outPower,
+      )})`
+    : "1";
+  return `${volume}*min(${a},${b})`;
 }
 
-export async function renderMaster(
+async function timelineGraph(
   store: MediaStore,
-  clips: MasterClip[],
-  destination: string,
-  format: "wav" | "mp3",
+  clips: MixRenderClip[],
+  duration: number,
+  from: number,
+  until: number,
   fadeMs: number,
+  signal?: AbortSignal,
+) {
+  if (
+    !clips.length ||
+    clips.length > 5000 ||
+    !Number.isFinite(duration) ||
+    duration <= 0
+  )
+    throw new Error(
+      "Choose audio before exporting; a mix supports up to 5000 clips.",
+    );
+  const first = Math.round(from * 48000),
+    last = Math.round(until * 48000);
+  const selected = clips.filter((clip) => {
+    if (!Number.isFinite(clip.offset) || clip.offset < 0)
+      throw new Error("Invalid clip placement.");
+    return (
+      Math.round((clip.offset + clip.duration) * 48000) > first &&
+      Math.round(clip.offset * 48000) < last
+    );
+  });
+  const filenames: string[] = [],
+    inputStarts: number[] = [],
+    filters: string[] = [];
+  const prepared: {
+    clip: MixRenderClip;
+    asset: Awaited<ReturnType<typeof tempoAsset>>;
+    input: number;
+    localStart: number;
+    localEnd: number;
+    delay: number;
+  }[] = [];
+  for (const clip of selected) {
+    signal?.throwIfAborted();
+    const asset = await tempoAsset(store, clip, signal);
+    const offset = Math.round(clip.offset * 48000);
+    const localStart = Math.max(0, first - offset),
+      localEnd = Math.min(asset.frames, last - offset);
+    let input = filenames.indexOf(asset.filename);
+    if (input < 0) {
+      input = filenames.length;
+      filenames.push(asset.filename);
+      inputStarts.push(asset.startFrame + localStart);
+    } else
+      inputStarts[input] = Math.min(
+        inputStarts[input],
+        asset.startFrame + localStart,
+      );
+    prepared.push({
+      clip,
+      asset,
+      input,
+      localStart,
+      localEnd,
+      delay: Math.max(0, offset - first),
+    });
+  }
+  filenames.forEach((_, input) => {
+    const outputs = prepared.flatMap((item, index) =>
+      item.input === input ? [`[s${index}]`] : [],
+    );
+    filters.push(`[${input}:a]asplit=${outputs.length}${outputs.join("")}`);
+  });
+  prepared.forEach(
+    ({ clip, asset, input, localStart, localEnd, delay }, index) => {
+      const gain = gainExpression(
+        clip,
+        asset.frames / 48000,
+        Math.max(0, Math.min(20, fadeMs)),
+      ).replace(/\bt\b/g, `(t+${localStart / 48000})`);
+      const trimStart = asset.startFrame + localStart - inputStarts[input],
+        trimEnd = asset.startFrame + localEnd - inputStarts[input];
+      filters.push(
+        `[s${index}]atrim=start_sample=${trimStart}:end_sample=${trimEnd},asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,aeval=exprs='val(0)*(${gain})|val(1)*(${gain})',adelay=${delay}S:all=1[c${index}]`,
+      );
+    },
+  );
+  const frames = last - first;
+  if (!selected.length)
+    filters.push(`anullsrc=r=48000:cl=stereo,atrim=end_sample=${frames}[out]`);
+  else
+    filters.push(
+      `${selected.map((_, i) => `[c${i}]`).join("")}amix=inputs=${selected.length}:normalize=0:duration=longest:dropout_transition=0,apad=whole_len=${frames},atrim=end_sample=${frames}[out]`,
+    );
+  return { filenames, inputStarts, filters, frames };
+}
+
+async function runTimeline(
+  store: MediaStore,
+  clips: MixRenderClip[],
+  duration: number,
+  from: number,
+  until: number,
+  fadeMs: number,
+  output: string[],
   options: {
     signal?: AbortSignal;
-    onProgress?: (progress: number) => void;
+    onProgress?: (fraction: number) => void;
+    maxBytes?: number;
   } = {},
 ) {
-  if (!clips.length)
-    throw new Error("Choose at least one sentence before exporting.");
-  if (clips.length > 5000)
-    throw new Error("This mix has too many clips to export at once.");
+  const graph = await timelineGraph(
+    store,
+    clips,
+    duration,
+    from,
+    until,
+    fadeMs,
+    options.signal,
+  );
+  const filterFile = path.join(store.root, `mix-${randomUUID()}.filter`);
   const ffmpeg = await findBinary("ffmpeg");
-  const ids = [...new Set(clips.map((c) => c.trackId))];
-  ids.forEach((id) => store.track(id));
-  const filters: string[] = [];
-  const labels = new Map<string, string[]>();
-  for (const [index, id] of ids.entries()) {
-    const names = clips
-      .filter((c) => c.trackId === id)
-      .map((_, n) => `s${index}_${n}`);
-    labels.set(id, [...names]);
-    filters.push(
-      `[${index}:a]asplit=${names.length}${names.map((n) => `[${n}]`).join("")}`,
-    );
-  }
-  for (const [index, clip] of clips.entries()) {
-    const track = store.track(clip.trackId);
-    if (
-      ![clip.start, clip.end].every(Number.isFinite) ||
-      clip.start < 0 ||
-      clip.end <= clip.start ||
-      clip.end > track.duration + 0.03
-    )
-      throw new Error("A selected clip has invalid audio boundaries.");
-    const speed = clip.speed ?? 1;
-    validatePlaybackSpeed(speed);
-    const startFrame = Math.max(0, Math.round(clip.start * 48000));
-    const endFrame = Math.min(
-      Math.round(track.duration * 48000),
-      Math.round(clip.end * 48000),
-    );
-    const outputFrames = Math.round((endFrame - startFrame) / speed);
-    if (outputFrames < 1)
-      throw new Error("A selected clip has no audible samples.");
-    const duration = outputFrames / 48000;
-    const fade = clipFades(
-      duration,
-      clip.fadeInMs ?? Math.max(0, Math.min(20, fadeMs)),
-      clip.fadeOutMs ?? Math.max(0, Math.min(20, fadeMs)),
-    );
-    const pause = clip.pauseBeforeMs ?? 0;
-    if (!Number.isFinite(pause) || pause < 0 || pause > 10_000)
-      throw new Error("A clip pause must be between 0 and 10000 milliseconds.");
-    const pauseFrames = Math.round(pause * 48);
-    const audioLabel = pauseFrames ? `a${index}` : `c${index}`;
-    filters.push(
-      `[${labels.get(clip.trackId)!.shift()}]atrim=start_sample=${startFrame}:end_sample=${endFrame},asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo${tempoFilters(
-        speed,
-      )
-        .map((filter) => `,${filter}`)
-        .join(
-          "",
-        )},apad=whole_len=${outputFrames},atrim=end_sample=${outputFrames}${fade.fadeIn ? `,afade=t=in:st=0:d=${fade.fadeIn}` : ""}${fade.fadeOut ? `,afade=t=out:st=${Math.max(0, duration - fade.fadeOut)}:d=${fade.fadeOut}` : ""}[${audioLabel}]`,
-    );
-    if (pauseFrames) {
-      filters.push(
-        `anullsrc=r=48000:cl=stereo,atrim=end_sample=${pauseFrames},asetpts=PTS-STARTPTS[p${index}]`,
-      );
-      filters.push(`[p${index}][${audioLabel}]concat=n=2:v=0:a=1[c${index}]`);
-    }
-  }
-  filters.push(
-    `${clips.map((_, i) => `[c${i}]`).join("")}concat=n=${clips.length}:v=0:a=1[out]`,
-  );
-  const filterFile = path.join(store.root, `export-${randomUUID()}.filter`);
-  const temporary = path.join(
-    path.dirname(destination),
-    `.${path.basename(destination)}.${randomUUID()}.${format}`,
-  );
-  const duration = clips.reduce(
-    (total, clip) =>
-      total +
-      Math.round(
-        (Math.round(clip.end * 48000) - Math.round(clip.start * 48000)) /
-          (clip.speed ?? 1),
-      ) /
-        48000 +
-      Math.round((clip.pauseBeforeMs ?? 0) * 48) / 48000,
-    0,
-  );
   try {
-    await writeFile(filterFile, filters.join(";\n"), { mode: 0o600 });
+    await writeFile(filterFile, graph.filters.join(";\n"), { mode: 0o600 });
     const render = (filterOption: string) =>
       runProcess(
         ffmpeg,
@@ -607,47 +847,169 @@ export async function renderMaster(
           "error",
           "-nostdin",
           "-y",
-          ...ids.flatMap((id) => ["-i", store.filename(id)]),
+          ...graph.filenames.flatMap((file, index) => [
+            "-ss",
+            (graph.inputStarts[index] / 48000).toFixed(9),
+            "-i",
+            file,
+          ]),
           filterOption,
           filterFile,
           "-map",
           "[out]",
-          ...(format === "mp3"
-            ? ["-c:a", "libmp3lame", "-b:a", "320k"]
-            : ["-c:a", "pcm_s24le", "-rf64", "auto"]),
           "-ar",
           "48000",
-          "-progress",
-          "pipe:1",
-          temporary,
+          "-ac",
+          "2",
+          ...output,
         ],
         {
           signal: options.signal,
-          onStdout: (text) => {
-            const m = /out_time_us=(\d+)/.exec(text);
-            if (m)
-              options.onProgress?.(Math.min(1, Number(m[1]) / 1e6 / duration));
-          },
+          maxBytes: options.maxBytes,
+          onStdout: options.onProgress
+            ? (text) => {
+                const m = /out_time_us=(\d+)/.exec(text);
+                if (m)
+                  options.onProgress?.(
+                    Math.min(1, Number(m[1]) / 1e6 / (until - from)),
+                  );
+              }
+            : undefined,
         },
       );
     try {
-      await render("-/filter_complex");
+      return await render("-/filter_complex");
     } catch (error) {
-      // FFmpeg 9 removed the old spelling; older distributions need it.
       if (
         error instanceof Error &&
         error.message.includes("Unrecognized option '/filter_complex'")
       )
-        await render("-filter_complex_script");
-      else throw error;
+        return await render("-filter_complex_script");
+      throw error;
     }
+  } finally {
+    await rm(filterFile, { force: true });
+  }
+}
+
+export async function decodeMixSlice(
+  store: MediaStore,
+  project: MixProject,
+  start: number,
+  end: number,
+  signal?: AbortSignal,
+): Promise<ArrayBuffer> {
+  const duration = mixDuration(project);
+  if (
+    ![start, end].every(Number.isFinite) ||
+    start < 0 ||
+    end <= start ||
+    end > duration + 1 / 48000 ||
+    end - start > 60
+  )
+    throw new Error("Invalid mixed preview interval.");
+  const result = await runTimeline(
+    store,
+    mixRenderClips(project),
+    duration,
+    start,
+    end,
+    project.joinFadeMs,
+    ["-f", "f32le", "-"],
+    { signal, maxBytes: Math.round((end - start) * 48000) * 8 + 8192 },
+  );
+  return Uint8Array.from(result.stdout).buffer;
+}
+
+export async function renderMix(
+  store: MediaStore,
+  project: MixProject,
+  destination: string,
+  format: "wav" | "mp3",
+  options: {
+    signal?: AbortSignal;
+    onProgress?: (fraction: number) => void;
+  } = {},
+) {
+  return renderTimeline(
+    store,
+    mixRenderClips(project),
+    destination,
+    format,
+    project.joinFadeMs,
+    options,
+  );
+}
+
+async function renderTimeline(
+  store: MediaStore,
+  clips: MixRenderClip[],
+  destination: string,
+  format: "wav" | "mp3",
+  fadeMs: number,
+  options: {
+    signal?: AbortSignal;
+    onProgress?: (fraction: number) => void;
+  } = {},
+) {
+  const duration = Math.max(
+    0,
+    ...clips.map((clip) => clip.offset + clip.duration),
+  );
+  const temporary = path.join(
+    path.dirname(destination),
+    `.${path.basename(destination)}.${randomUUID()}.${format}`,
+  );
+  try {
+    await runTimeline(
+      store,
+      clips,
+      duration,
+      0,
+      duration,
+      fadeMs,
+      [
+        ...(format === "mp3"
+          ? ["-c:a", "libmp3lame", "-b:a", "320k"]
+          : ["-c:a", "pcm_s24le", "-rf64", "auto"]),
+        "-progress",
+        "pipe:1",
+        temporary,
+      ],
+      options,
+    );
+    options.signal?.throwIfAborted();
     await rename(temporary, destination);
   } finally {
-    await Promise.all([
-      rm(filterFile, { force: true }),
-      rm(temporary, { force: true }),
-    ]);
+    await rm(temporary, { force: true });
   }
+}
+
+/** Narration-only API retained for exact source and joint regression coverage. */
+export async function renderMaster(
+  store: MediaStore,
+  clips: MasterClip[],
+  destination: string,
+  format: "wav" | "mp3",
+  fadeMs: number,
+  options: {
+    signal?: AbortSignal;
+    onProgress?: (fraction: number) => void;
+  } = {},
+) {
+  let offset = 0;
+  const ordered = clips.map((clip) => {
+    offset += Math.round((clip.pauseBeforeMs ?? 0) * 48) / 48000;
+    const duration =
+      Math.round(
+        (Math.round(clip.end * 48000) - Math.round(clip.start * 48000)) /
+          (clip.speed ?? 1),
+      ) / 48000;
+    const result = { ...clip, offset, duration };
+    offset += duration;
+    return result;
+  });
+  return renderTimeline(store, ordered, destination, format, fadeMs, options);
 }
 
 export { createReadStream };

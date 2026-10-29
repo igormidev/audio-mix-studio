@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AudioSegment, MasterClip, MixProject } from "../shared/types";
+import { mixDuration } from "../domain/soundMix";
 import {
   deinterleavePCM,
   chunkGainEnvelope,
@@ -41,6 +42,11 @@ export function usePlayer(
     active: false,
     preview: null,
   });
+  const mixedSession = useRef(false);
+  const mixCacheIdentity = useRef<{
+    project: MixProject | null;
+    revision: number;
+  }>({ project: null, revision: 0 });
   const errorHandler = useRef(onError);
   errorHandler.current = onError;
 
@@ -64,6 +70,11 @@ export function usePlayer(
       setPosition(positionRef.current);
     }
     generation.current++;
+    if (session.current.active || mixedSession.current) {
+      void window.studio.cancelPlayback?.(project.id).catch(() => undefined);
+      mixedSession.current = false;
+      pending.current.clear();
+    }
     if (seekTimer.current) clearTimeout(seekTimer.current);
     seekTimer.current = null;
     resumeAfterSeek.current = false;
@@ -83,14 +94,31 @@ export function usePlayer(
     setPlaying(false);
     setPreparing(false);
     setPreviewId(null);
-  }, [clockPosition]);
+  }, [clockPosition, project.id]);
 
   const playItems = useCallback(
-    async (items: PlaybackItem[], from: number, preview: string | null) => {
+    async (
+      items: PlaybackItem[],
+      from: number,
+      preview: string | null,
+      mixedProject?: MixProject,
+    ) => {
       stop();
       const run = generation.current;
       try {
-        const plan = planPlayback(items, from);
+        const plan = planPlayback(items, from, mixedProject ? 20 : undefined);
+        if (mixedProject) {
+          mixedSession.current = true;
+          if (mixCacheIdentity.current.project !== mixedProject)
+            mixCacheIdentity.current = {
+              project: mixedProject,
+              revision: mixCacheIdentity.current.revision + 1,
+            };
+          const identity = `${mixedProject.id}:${mixCacheIdentity.current.revision}`;
+          plan.forEach((chunk) => {
+            chunk.key = `${identity}:${chunk.start}:${chunk.end}`;
+          });
+        }
         if (!plan.length) return;
         session.current = { active: true, preview };
         setPlaying(true);
@@ -124,8 +152,17 @@ export function usePlayer(
           }
           const existing = pending.current.get(chunk.key);
           if (existing) return existing;
-          const request = window.studio
-            .audioSlice(chunk.trackId, chunk.start, chunk.end, chunk.speed ?? 1)
+          const decoded = mixedProject
+            ? window.studio.mixSlice(mixedProject, chunk.start, chunk.end)
+            : window.studio.audioSlice(
+                chunk.trackId,
+                chunk.start,
+                chunk.end,
+                chunk.speed ?? 1,
+                chunk.logicalSource,
+                project.id,
+              );
+          const request = decoded
             .then((bytes) => {
               const [left, right] = deinterleavePCM(bytes);
               if (left.length / PCM_SAMPLE_RATE < chunk.duration - 0.001)
@@ -154,7 +191,10 @@ export function usePlayer(
               cacheBytes.current += size;
               return buffer;
             })
-            .finally(() => pending.current.delete(chunk.key));
+            .finally(() => {
+              if (pending.current.get(chunk.key) === request)
+                pending.current.delete(chunk.key);
+            });
           pending.current.set(chunk.key, request);
           return request;
         };
@@ -277,20 +317,34 @@ export function usePlayer(
         }
       }
     },
-    [stop, clockPosition],
+    [stop, clockPosition, project.id],
   );
 
   const playMaster = useCallback(
     (from = positionRef.current) => {
-      const last = clips[clips.length - 1];
-      const duration = last ? last.offset + last.duration : 0;
+      const duration = mixDuration(project);
       const at =
         !Number.isFinite(from) || from >= duration - 0.001
           ? 0
           : Math.max(0, from);
-      void playItems(clips, at, null);
+      if (project.soundMix?.placements.length)
+        void playItems(
+          [
+            {
+              id: "mixed-master",
+              trackId: "mixed-master",
+              start: 0,
+              end: duration,
+              offset: 0,
+            },
+          ],
+          at,
+          null,
+          project,
+        );
+      else void playItems(clips, at, null);
     },
-    [clips, playItems],
+    [clips, playItems, project],
   );
 
   const previewMany = useCallback(
@@ -356,8 +410,7 @@ export function usePlayer(
       const wasPlaying =
         (session.current.active && session.current.preview === null) ||
         resumeAfterSeek.current;
-      const last = clips[clips.length - 1];
-      const duration = last ? last.offset + last.duration : 0;
+      const duration = mixDuration(project);
       const at = Math.max(
         0,
         Math.min(duration, Number.isFinite(value) ? value : 0),
@@ -374,12 +427,14 @@ export function usePlayer(
         }, 100);
       }
     },
-    [clips, stop, playMaster],
+    [project, stop, playMaster],
   );
 
   useEffect(
     () => () => {
       generation.current++;
+      if (session.current.active || mixedSession.current)
+        void window.studio.cancelPlayback?.(project.id).catch(() => undefined);
       if (seekTimer.current) clearTimeout(seekTimer.current);
       for (const [source, scheduled] of sources.current) {
         source.onended = null;
@@ -398,7 +453,7 @@ export function usePlayer(
       void context.current?.close().catch(() => undefined);
       context.current = null;
     },
-    [],
+    [project.id],
   );
   return {
     playing,

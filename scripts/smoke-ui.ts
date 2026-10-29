@@ -79,43 +79,56 @@ try {
   });
   await page.screenshot({ path: path.join(artifacts, "native-choices.png") });
 
-  await page.getByRole("tab", { name: "Manual edit" }).click();
-  await expect(page.locator(".source-segment")).toHaveCount(9);
-  const enabledBefore = await page.locator(".source-segment.enabled").count();
-  await page.locator(".source-segment.enabled").first().click();
-  await expect(page.locator(".source-segment.enabled")).toHaveCount(
-    enabledBefore - 1,
+  await expect(page.getByRole("tab", { name: "Manual edit" })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Music & Sound Track" }).click();
+  await expect(page.locator(".music-lane")).toHaveCount(3);
+  await expect(page.locator(".music-lane-name strong")).toHaveText([
+    "Voiceover",
+    "Music 1",
+    "Soundtrack 1",
+  ]);
+  const beforeSpeed = await page.evaluate(() =>
+    window.studio.restoreWorkspace(),
   );
-  await page.getByRole("button", { name: "Undo", exact: true }).click();
-  await expect(page.locator(".source-segment.enabled")).toHaveCount(
-    enabledBefore,
-  );
-  await page.getByRole("button", { name: /^Cut/ }).click();
-  const segment = page.locator(".source-segment.enabled").first();
-  const box = await segment.boundingBox();
-  if (!box) throw new Error("No selected segment is visible for a manual cut.");
-  await segment.click({ position: { x: box.width / 2, y: box.height / 2 } });
-  await expect(page.locator(".source-segment")).toHaveCount(10);
-  await page.getByRole("button", { name: "Select", exact: true }).click();
   await page
-    .locator(".source-segment.enabled")
+    .getByRole("button", { name: /^Edit voiceover speed:/ })
     .first()
-    .click({ button: "right" });
-  const startField = page.getByRole("spinbutton", {
-    name: "Segment start seconds",
-  });
-  const current = Number(await startField.inputValue());
-  await startField.fill((current + 0.02).toFixed(3));
-  await page.getByRole("button", { name: "Apply trim" }).click();
-  if (await page.locator(".error-banner").count())
-    throw new Error(await page.locator(".error-banner").innerText());
-  await expect(page.locator(".error-banner")).toHaveCount(0);
-  await page.getByRole("button", { name: "Close segment controls" }).click();
-  if (await noticeDismiss.count()) await noticeDismiss.click();
-  await page.locator(".editor-content").evaluate((element) => {
-    element.scrollTop = 0;
-  });
-  await page.screenshot({ path: path.join(artifacts, "native-manual.png") });
+    .click();
+  await expect(
+    page.getByRole("complementary", { name: "Selected audio settings" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("slider", { name: "Playback speed", exact: true }),
+  ).toHaveAttribute("max", "2");
+  await expect(
+    page.getByRole("slider", { name: "Volume", exact: true }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Increase speed by one percent" })
+    .click();
+  await expect(
+    page.getByRole("spinbutton", { name: "Playback speed value" }),
+  ).toHaveValue("1.01");
+  await expect
+    .poll(async () => {
+      const current = await page.evaluate(() =>
+        window.studio.restoreWorkspace(),
+      );
+      return current?.projects[0].groups[0].speed;
+    })
+    .toBe(1.01);
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect
+    .poll(async () => {
+      const current = await page.evaluate(() =>
+        window.studio.restoreWorkspace(),
+      );
+      return current?.projects[0].groups;
+    })
+    .toEqual(beforeSpeed!.projects[0].groups);
+  await page.getByRole("button", { name: "Close audio settings" }).click();
+  await page.screenshot({ path: path.join(artifacts, "native-music.png") });
+  await page.getByRole("tab", { name: /^Sentence choices/ }).click();
 
   await app.evaluate(({ BrowserWindow }) => {
     BrowserWindow.getAllWindows()[0].setContentSize(1024, 720);
@@ -200,7 +213,7 @@ try {
       "utf8",
     ),
   );
-  if (autosave.projects[0].segments.length !== 10)
+  if (autosave.projects[0].segments.length !== 9)
     throw new Error("Edited project was not autosaved.");
   await app.close();
   app = await electron.launch({
@@ -211,8 +224,9 @@ try {
   });
   const restoredPage = await app.firstWindow();
   await expect(restoredPage.locator(".sentence-row")).toHaveCount(4);
-  await restoredPage.getByRole("tab", { name: "Manual edit" }).click();
-  await expect(restoredPage.locator(".source-segment")).toHaveCount(10);
+  await restoredPage.getByRole("tab", { name: "Music & Sound Track" }).click();
+  await expect(restoredPage.locator(".music-lane")).toHaveCount(3);
+  await expect(restoredPage.locator(".voice-clip")).toHaveCount(4);
   console.log(
     JSON.stringify(
       {
@@ -220,14 +234,14 @@ try {
         choices: true,
         preview: true,
         masterPlayback: true,
-        manualMuteUndoCutTrim: true,
+        musicWorkspaceAndVoiceoverSpeedUndo: true,
         output: exported,
         autosave: true,
         coldRestart: true,
         responsive,
         screenshots: [
           "artifacts/native-choices.png",
-          "artifacts/native-manual.png",
+          "artifacts/native-music.png",
         ],
       },
       null,

@@ -21,6 +21,7 @@ export interface PlaybackChunk extends PlaybackItem {
   silent?: boolean;
   clipOffset?: number;
   clipDuration?: number;
+  logicalSource?: { start: number; end: number };
 }
 
 /** Exact sample boundaries. Internal chunks add no fades or silent gaps. */
@@ -51,7 +52,7 @@ export function planPlayback(
       !Number.isFinite(speed) ||
       speed < 0.5 ||
       speed > 2.5 ||
-      !Number.isInteger(speed * 4)
+      Math.abs(speed * 100 - Math.round(speed * 100)) > 0.000001
     )
       throw new Error("Invalid sentence speed.");
     const sourceStart = Math.round(item.start * PCM_SAMPLE_RATE);
@@ -83,7 +84,9 @@ export function planPlayback(
     );
     // Multiples of the speed numerator produce integer output-frame counts.
     // This keeps chunked playback duration equal to a single FFmpeg export.
-    const numerator = Math.round(speed * 4);
+    const speedPercent = Math.round(speed * 100);
+    const gcd = (a: number, b: number): number => (b ? gcd(b, a % b) : a);
+    const numerator = speedPercent / gcd(speedPercent, 100);
     const requestedFrames = Math.min(
       60 * PCM_SAMPLE_RATE,
       chunkSeconds * PCM_SAMPLE_RATE * speed,
@@ -100,7 +103,7 @@ export function planPlayback(
       chunks.push({
         id: item.id,
         trackId: item.trackId,
-        key: `${item.trackId}:${frame}:${until}:${speed}`,
+        key: `${item.trackId}:${frame}:${until}:${speed}:${sourceStart}:${endFrame}`,
         start: frame / PCM_SAMPLE_RATE,
         end: until / PCM_SAMPLE_RATE,
         offset,
@@ -112,6 +115,9 @@ export function planPlayback(
         fadeOutMs: item.fadeOutMs ?? 0,
         clipOffset,
         clipDuration: outputDuration,
+        ...(speed !== 1 && (frame !== sourceStart || until !== endFrame)
+          ? { logicalSource: { start: item.start, end: item.end } }
+          : {}),
       });
       offset += duration;
     }

@@ -394,7 +394,7 @@ describe("real FFmpeg media pipeline", () => {
       decodeAudioSlice(store, track.id, 0, 1, undefined, 2.6),
     ).rejects.toThrow(/speed/);
     await expect(
-      decodeAudioSlice(store, track.id, 0, 1, undefined, 0.6),
+      decodeAudioSlice(store, track.id, 0, 1, undefined, 0.605),
     ).rejects.toThrow(/speed/);
     p = setJointDefaults(p, { fadeOutMs: 200, fadeInMs: 300 });
     const faded = path.join(directory, "speed-pause-fades.wav");

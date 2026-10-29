@@ -69,7 +69,7 @@ async function waitProject(
 }
 async function ready(page: Page) {
   await expect(
-    current(page).getByRole("button", { name: "Add audio takes", exact: true }),
+    current(page).getByRole("button", { name: "Add audio", exact: true }),
   ).toBeEnabled();
   await expect(current(page).locator(".progress-banner")).toHaveCount(0);
 }
@@ -380,7 +380,7 @@ try {
   );
   await page.keyboard.press("Escape");
   await current(page)
-    .getByRole("tab", { name: "Manual edit", exact: true })
+    .getByRole("tab", { name: "Music & Sound Track", exact: true })
     .click();
   await seek(page, unit * (lateIndex + 0.15), visualDuration);
   await editorTop(page);
@@ -589,12 +589,12 @@ try {
     .getByRole("button", { name: "Use light mode", exact: true })
     .click();
   await current(page)
-    .getByRole("tab", { name: "Manual edit", exact: true })
+    .getByRole("tab", { name: "Music & Sound Track", exact: true })
     .click();
   await editorTop(page);
   await page.mouse.move(6, 55);
   await page.screenshot({
-    path: path.join(artifacts, "master-cuts-demo-manual.png"),
+    path: path.join(artifacts, "master-cuts-demo-music.png"),
   });
   expect(errors).toEqual([]);
   console.log(
@@ -608,13 +608,13 @@ try {
         grayRestoreUndoRedo: true,
         grayCursorJump: true,
         masterSentenceFollow: true,
-        noFollowForPreviewManualInactive: true,
+        noFollowForPreviewMusicInactive: true,
         portableRestartExactExport: beforeHash,
         screenshot: "artifacts/master-cuts-light.png",
         documentationScreenshots: [
           "master-cuts-demo-light.png",
           "master-cuts-demo-dark.png",
-          "master-cuts-demo-manual.png",
+          "master-cuts-demo-music.png",
         ],
       },
       null,

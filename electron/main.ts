@@ -38,8 +38,8 @@ import {
   masterClips,
   applyAlignment,
   parseProject,
-  sentenceSpeeds,
 } from "../src/domain/project";
+import { mixRenderClips } from "../src/domain/soundMix";
 import {
   checkDependencies,
   setupTranscription,
@@ -53,7 +53,9 @@ import {
   atomicJSON,
   byteRange,
   createReadStream,
-  renderMaster,
+  renderMix,
+  decodeMixSlice,
+  validatePlaybackSpeed,
   runProcess,
   findBinary,
   decodeAudioSlice,
@@ -105,6 +107,8 @@ let operationCompletion: Promise<unknown> | null = null;
 const projectPaths = new Map<string, string>();
 const canonicalProjectPaths = new Map<string, string>();
 const previewControllers = new Set<AbortController>();
+const mixPreviewControllers = new Map<AbortController, string>();
+const mixPreviewEpochs = new Map<string, number>();
 const previewTasks = new Set<Promise<ArrayBuffer>>();
 const previewQueue: (() => void)[] = [];
 let activePreviews = 0;
@@ -422,6 +426,7 @@ async function openProject(origin?: unknown) {
       imported.push({
         ...cached,
         transcript: track.transcript,
+        role: track.role,
         ...(track.sentenceGroupId
           ? { sentenceGroupId: track.sentenceGroupId }
           : {}),
@@ -432,6 +437,13 @@ async function openProject(origin?: unknown) {
       ...segment,
       trackId: idMap.get(segment.trackId)!,
     }));
+    if (project.soundMix)
+      project.soundMix.placements = project.soundMix.placements.map(
+        (placement) => ({
+          ...placement,
+          trackId: idMap.get(placement.trackId)!,
+        }),
+      );
     const checked = checkedProject(project);
     if (signal.aborted) throw new Error("Operation cancelled.");
     // The same saved document (or a copied manifest) may be opened twice.
@@ -600,7 +612,7 @@ function registerIPC() {
     const projectId = checkedProjectId(origin);
     return withFileOperation(async (signal, report) => {
       const result = await dialog.showOpenDialog(window!, {
-        title: "Add voice takes",
+        title: "Add audio to your studio",
         properties: ["openFile", "multiSelections"],
         filters: [{ name: "Audio files", extensions: AUDIO_EXTENSIONS }],
       });
@@ -617,26 +629,54 @@ function registerIPC() {
   handle("studio:importPaths", importFiles);
   handle(
     "studio:audioSlice",
-    async (id: unknown, start: unknown, end: unknown, speed: unknown = 1) => {
+    async (
+      id: unknown,
+      start: unknown,
+      end: unknown,
+      speed: unknown = 1,
+      logicalSource?: unknown,
+      origin?: unknown,
+    ) => {
       if (closing) throw new Error("The studio is closing.");
       if (
         typeof id !== "string" ||
         typeof start !== "number" ||
         typeof end !== "number" ||
         typeof speed !== "number" ||
-        !Number.isFinite(speed) ||
-        speed < 0.5 ||
-        !sentenceSpeeds.includes(speed as (typeof sentenceSpeeds)[number])
+        !Number.isFinite(speed)
       )
         throw new Error("Invalid preview request.");
+      validatePlaybackSpeed(speed);
+      const owner = checkedProjectId(origin);
+      const epoch = owner ? (mixPreviewEpochs.get(owner) ?? 0) : 0;
+      let source: { start: number; end: number } | undefined;
+      if (logicalSource !== undefined) {
+        if (
+          !logicalSource ||
+          typeof logicalSource !== "object" ||
+          Array.isArray(logicalSource) ||
+          Object.keys(logicalSource).some(
+            (key) => key !== "start" && key !== "end",
+          ) ||
+          typeof (logicalSource as { start?: unknown }).start !== "number" ||
+          typeof (logicalSource as { end?: unknown }).end !== "number"
+        )
+          throw new Error("Invalid logical preview source.");
+        source = logicalSource as { start: number; end: number };
+      }
       if (previewQueue.length >= 12)
         throw new Error("Preview is busy. Try again in a moment.");
       if (activePreviews >= 2)
         await new Promise<void>((resolve) => previewQueue.push(resolve));
       if (closing) throw new Error("The studio is closing.");
+      if (owner && epoch !== (mixPreviewEpochs.get(owner) ?? 0)) {
+        previewQueue.shift()?.();
+        throw new Error("Playback cancelled.");
+      }
       activePreviews++;
       const controller = new AbortController();
       previewControllers.add(controller);
+      if (owner) mixPreviewControllers.set(controller, owner);
       const task = decodeAudioSlice(
         media,
         id,
@@ -644,6 +684,7 @@ function registerIPC() {
         end,
         controller.signal,
         speed,
+        source,
       );
       previewTasks.add(task);
       try {
@@ -651,11 +692,59 @@ function registerIPC() {
       } finally {
         previewTasks.delete(task);
         previewControllers.delete(controller);
+        mixPreviewControllers.delete(controller);
         activePreviews--;
         previewQueue.shift()?.();
       }
     },
   );
+  handle(
+    "studio:mixSlice",
+    async (value: unknown, start: unknown, end: unknown) => {
+      if (closing) throw new Error("The studio is closing.");
+      const project = checkedProject(value);
+      if (typeof start !== "number" || typeof end !== "number")
+        throw new Error("Invalid mixed preview interval.");
+      const epoch = mixPreviewEpochs.get(project.id) ?? 0;
+      if (previewQueue.length >= 12)
+        throw new Error("Preview is busy. Try again in a moment.");
+      if (activePreviews >= 2)
+        await new Promise<void>((resolve) => previewQueue.push(resolve));
+      if (closing) throw new Error("The studio is closing.");
+      if (epoch !== (mixPreviewEpochs.get(project.id) ?? 0)) {
+        previewQueue.shift()?.();
+        throw new Error("Playback cancelled.");
+      }
+      activePreviews++;
+      const controller = new AbortController();
+      previewControllers.add(controller);
+      mixPreviewControllers.set(controller, project.id);
+      const task = decodeMixSlice(
+        media,
+        project,
+        start,
+        end,
+        controller.signal,
+      );
+      previewTasks.add(task);
+      try {
+        return await task;
+      } finally {
+        previewTasks.delete(task);
+        previewControllers.delete(controller);
+        mixPreviewControllers.delete(controller);
+        activePreviews--;
+        previewQueue.shift()?.();
+      }
+    },
+  );
+  handle("studio:cancelPlayback", (origin: unknown) => {
+    const projectId = checkedProjectId(origin);
+    if (!projectId) throw new Error("Invalid playback owner.");
+    mixPreviewEpochs.set(projectId, (mixPreviewEpochs.get(projectId) ?? 0) + 1);
+    for (const [controller, id] of mixPreviewControllers)
+      if (id === projectId) controller.abort();
+  });
   handle("studio:cancel", (origin?: unknown) => {
     const projectId = checkedProjectId(origin);
     if (projectId === undefined || operationProjectId === projectId)
@@ -680,7 +769,10 @@ function registerIPC() {
       // A sentence replacement is already attached to one explicit choice.
       // Treating it as another complete script would let AI create unrelated
       // rows or consume its timing when regrouping the original full takes.
-      const takes = project.tracks.filter((track) => !track.sentenceGroupId);
+      const takes = project.tracks.filter(
+        (track) =>
+          !track.sentenceGroupId && (track.role ?? "voiceover") === "voiceover",
+      );
       if (!takes.length)
         throw new Error("Add a complete audio take before grouping sentences.");
       const dependencies = await checkDependencies(cacheDirectory, signal);
@@ -705,6 +797,16 @@ function registerIPC() {
             signal,
           );
         }
+      }
+      for (const track of takes) {
+        if (
+          !track.transcript?.segments.some((segment) =>
+            /[\p{L}\p{N}]/u.test(segment.text),
+          )
+        )
+          throw new Error(
+            "No spoken dialogue was found. The first source must be a voiceover recording.",
+          );
       }
       const alignment = await alignTranscripts(
         takes,
@@ -771,7 +873,7 @@ function registerIPC() {
     const project = checkedProject(value);
     if (format !== "wav" && format !== "mp3")
       throw new Error("Choose WAV or MP3 export.");
-    if (!masterClips(project).length)
+    if (!mixRenderClips(project).length)
       throw new Error("Choose at least one sentence to export.");
     return withFileOperation(async (signal, report) => {
       const result = await dialog.showSaveDialog(window!, {
@@ -789,22 +891,15 @@ function registerIPC() {
         message: "Rendering your master…",
         fraction: 0,
       });
-      await renderMaster(
-        media,
-        masterClips(project),
-        filename,
-        format,
-        project.joinFadeMs,
-        {
-          signal,
-          onProgress: (fraction) =>
-            report({
-              phase: "exporting",
-              message: "Rendering your master…",
-              fraction,
-            }),
-        },
-      );
+      await renderMix(media, project, filename, format, {
+        signal,
+        onProgress: (fraction) =>
+          report({
+            phase: "exporting",
+            message: "Rendering your master…",
+            fraction,
+          }),
+      });
       signal.throwIfAborted();
       await preferences.recordSuccessfulExport();
       return filename;
@@ -842,6 +937,7 @@ function registerIPC() {
       codex: "https://developers.openai.com/codex/cli/",
       ffmpeg: "https://ffmpeg.org/download.html",
       whisperx: "https://github.com/m-bain/whisperX",
+      soundtouch: "https://www.surina.net/soundtouch/",
     };
     if (typeof target !== "string" || !Object.hasOwn(links, target))
       throw new Error("Unknown dependency.");

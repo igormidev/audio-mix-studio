@@ -214,7 +214,7 @@ async function capture(application: ElectronApplication, page: Page) {
           })
           .click();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      for (const mode of ["choices", "manual", "settings"] as const) {
+      for (const mode of ["choices", "music", "settings"] as const) {
         if (mode === "settings") {
           const dialog = await settings(page);
           await expect(
@@ -226,7 +226,10 @@ async function capture(application: ElectronApplication, page: Page) {
         } else {
           await current(page)
             .getByRole("tab", {
-              name: mode === "choices" ? /^Sentence choices/ : "Manual edit",
+              name:
+                mode === "choices"
+                  ? /^Sentence choices/
+                  : "Music & Sound Track",
             })
             .click();
           await current(page)
@@ -292,7 +295,7 @@ try {
   const editedLastDemo = await waitProject(
     page,
     c.id,
-    (p) => p.groups[0].speed === 1.25,
+    (p) => p.groups[0].speed === 1.01,
   );
   await page
     .getByRole("button", { name: "Close Closed demo", exact: true })
@@ -336,13 +339,13 @@ try {
     ),
   ).toHaveCount(0);
   const add = await sidebar
-    .getByRole("button", { name: "Add audio takes", exact: true })
+    .getByRole("button", { name: "Add audio", exact: true })
     .boundingBox();
   const download = await sidebar
     .getByRole("button", { name: "Export master", exact: true })
     .boundingBox();
   if (!add || !download || download.y < add.y + add.height)
-    throw new Error("Export is not below Add audio takes in the sidebar.");
+    throw new Error("Export is not below Add audio in the sidebar.");
   const cards = await sidebar.locator(".take").evaluateAll((elements) =>
     elements.map((element) => ({
       filename: element.querySelector(".take-filename")?.textContent,
@@ -365,7 +368,7 @@ try {
       .filter((clip) => clip.trackId === a.tracks[index].id)
       .reduce((sum, clip) => sum + clip.duration, 0);
     expect(card.share).toBe(
-      `${Math.round((duration / initialMixDuration) * 100)}% of mix`,
+      `${Math.round((duration / initialMixDuration) * 100)}% of narration`,
     );
     expect(card.icon).toBe(true);
   });
@@ -426,21 +429,69 @@ try {
   const faster = await waitProject(
     page,
     a.id,
-    (p) => p.groups[0].speed === 1.25,
+    (p) => p.groups[0].speed === 1.01,
   );
   expect(masterDuration(faster)).toBeLessThan(masterDuration(beforeSpeed));
   await current(page)
     .getByRole("button", { name: "Undo", exact: true })
     .click();
   await waitProject(page, a.id, (p) => p.groups[0].speed === 1);
-  for (let index = 0; index < 2; index++) await decrease.click();
-  await expect(decrease).toBeDisabled();
-  await waitProject(page, a.id, (p) => p.groups[0].speed === 0.5);
-  for (let index = 0; index < 8; index++) await increase.click();
-  await expect(increase).toBeDisabled();
-  await waitProject(page, a.id, (p) => p.groups[0].speed === 2.5);
-  for (let index = 0; index < 5; index++) await decrease.click();
-  await waitProject(page, a.id, (p) => p.groups[0].speed === 1.25);
+  await decrease.click();
+  await waitProject(page, a.id, (p) => p.groups[0].speed === 0.99);
+  await current(page)
+    .getByRole("button", { name: "Undo", exact: true })
+    .click();
+  await waitProject(page, a.id, (p) => p.groups[0].speed === 1);
+  await expect(
+    current(page).getByRole("tab", { name: "Manual edit" }),
+  ).toHaveCount(0);
+  await current(page).getByRole("tab", { name: "Music & Sound Track" }).click();
+  await expect(current(page).locator(".music-lane")).toHaveCount(3);
+  await expect(current(page).locator(".music-lane-name strong")).toHaveText([
+    "Voiceover",
+    "Music 1",
+    "Soundtrack 1",
+  ]);
+  await current(page)
+    .getByRole("button", { name: /^Edit voiceover speed:/ })
+    .first()
+    .click();
+  await expect(
+    current(page).getByRole("slider", { name: "Volume", exact: true }),
+  ).toHaveCount(0);
+  const speedValue = current(page).getByRole("spinbutton", {
+    name: "Playback speed value",
+    exact: true,
+  });
+  const setVoiceSpeed = async (speed: number) => {
+    await speedValue.fill(String(speed));
+    await speedValue.press("Enter");
+    await waitProject(page, a.id, (p) => p.groups[0].speed === speed);
+  };
+  await setVoiceSpeed(0.5);
+  await expect(
+    current(page).getByRole("button", {
+      name: "Decrease speed by one percent",
+    }),
+  ).toBeDisabled();
+  await setVoiceSpeed(2);
+  await expect(
+    current(page).getByRole("button", {
+      name: "Increase speed by one percent",
+    }),
+  ).toBeDisabled();
+  await setVoiceSpeed(1.25);
+  const speedEdited = await project(page, a.id);
+  const speedClips = masterClips(speedEdited);
+  expect(speedClips[1].offset).toBe(
+    speedClips[0].offset + speedClips[0].duration,
+  );
+  await current(page)
+    .getByRole("button", { name: "Close audio settings" })
+    .click();
+  await current(page)
+    .getByRole("tab", { name: /^Sentence choices/ })
+    .click();
 
   const beforeSkip = await project(page, a.id);
   await current(page)
@@ -830,6 +881,7 @@ try {
           wholeCardSelection: true,
           previewDoesNotSelect: true,
           speedBoundsAndUndo: true,
+          musicWorkspaceLanesAndVoiceoverInspector: true,
           skippedMiddleJointTargetsAudibleNeighbors: true,
           jointControlsAndOverrides: true,
           scrolledJointSliderRemainsInsideViewport: true,

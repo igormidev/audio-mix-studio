@@ -547,7 +547,8 @@ describe("sentence speed and joints", () => {
     expect(clips[1].pauseBeforeMs).toBe(500);
     expect(masterDuration(p)).toBe(16);
     expect(parseProject(p)).toEqual(p);
-    expect(() => setGroupSpeed(p, left.id, 0.7)).toThrow(/0.25/);
+    expect(setGroupSpeed(p, left.id, 0.7).groups[0].speed).toBe(0.7);
+    expect(() => setGroupSpeed(p, left.id, 0.701)).toThrow(/1%/);
   });
   it("uses overrides per field, falls back to defaults, and never pauses before the first audible group", () => {
     let p = twoSentences();

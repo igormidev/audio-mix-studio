@@ -43,11 +43,12 @@ export async function checkDependencies(
     AbortSignal.timeout(120_000),
     ...(operationSignal ? [operationSignal] : []),
   ]);
-  const [codex, ffmpeg, python, models] = await Promise.all([
+  const [codex, ffmpeg, python, models, soundtouch] = await Promise.all([
     findExecutable("codex"),
     findExecutable("ffmpeg"),
     findRuntime(cacheDir, signal),
     downloadedModels(cacheDir, signal),
+    findExecutable("soundstretch"),
   ]);
   let codexDetail = "Install Codex CLI and sign in with “codex login”.";
   let codexReady = false;
@@ -79,8 +80,24 @@ export async function checkDependencies(
       /* The settings UI exposes the install instructions. */
     }
   }
+  let soundtouchReady = false;
+  if (soundtouch) {
+    try {
+      await runProcess(soundtouch, ["-license"], { signal, timeoutMs: 15_000 });
+      soundtouchReady = true;
+    } catch {
+      /* Expose installation repair guidance in Settings. */
+    }
+  }
   signal.throwIfAborted();
   return {
+    soundtouch: {
+      available: soundtouchReady,
+      ...(soundtouch ? { path: soundtouch } : {}),
+      detail: soundtouchReady
+        ? "SoundTouch · Audacity-style pitch-preserving tempo ready."
+        : "Install SoundTouch with “brew install sound-touch” for pitch-preserving speed.",
+    },
     codex: {
       available: codexReady,
       ...(codex ? { path: codex } : {}),
