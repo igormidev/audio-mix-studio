@@ -85,8 +85,15 @@ export async function checkDependencies(
     try {
       await runProcess(soundtouch, ["-license"], { signal, timeoutMs: 15_000 });
       soundtouchReady = true;
-    } catch {
-      /* Expose installation repair guidance in Settings. */
+    } catch (error) {
+      // SoundStretch 2.4.1 intentionally returns 255 after printing -license.
+      // Recognize its complete response while still rejecting launch failures,
+      // timeouts, and broken executables.
+      const output = error instanceof Error ? error.message : "";
+      soundtouchReady =
+        /\bSoundStretch v\d+\.\d+/u.test(output) &&
+        /LICENSE:/u.test(output) &&
+        /SoundTouch sound processing library/u.test(output);
     }
   }
   signal.throwIfAborted();
