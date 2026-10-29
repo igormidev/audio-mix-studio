@@ -24,6 +24,13 @@ try {
   await expect(
     page.getByRole("button", { name: "Import your audio", exact: true }),
   ).toBeEnabled();
+  await page
+    .getByRole("tab", { name: "Music & Sound Track", exact: true })
+    .click();
+  await expect(page.locator(".music-lane")).toHaveCount(3);
+  await page
+    .getByRole("tab", { name: "Sentence choices", exact: true })
+    .click();
   const identity = await app.evaluate(({ app }) => ({
     executable: app.getPath("exe"),
     version: app.getVersion(),

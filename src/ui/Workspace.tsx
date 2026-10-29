@@ -1062,7 +1062,7 @@ export const Workspace = memo(function Workspace({
           </div>
         )}
 
-        {!project.tracks.length ? (
+        {!project.tracks.length && tab === "choices" ? (
           <div className="welcome">
             <AudioLines size={38} strokeWidth={1.5} />
             <h1>Compare your takes</h1>
