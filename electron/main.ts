@@ -7,6 +7,7 @@ import {
   protocol,
   shell,
   nativeTheme,
+  safeStorage,
 } from "electron";
 import {
   readFile,
@@ -40,6 +41,8 @@ import {
   parseProject,
 } from "../src/domain/project";
 import { mixRenderClips } from "../src/domain/soundMix";
+import { epidemicCatalog } from "../src/shared/epidemicCatalog";
+import { EpidemicService } from "./epidemic";
 import {
   checkDependencies,
   setupTranscription,
@@ -94,6 +97,7 @@ let cacheDirectory: string;
 let autosaveFile: string;
 let workspace: WorkspaceStore;
 let preferences: PreferencesStore;
+let epidemic: EpidemicService;
 let workspaceMode = false;
 let currentProject: MixProject | null = null;
 let persistenceQueue: Promise<void> = Promise.resolve();
@@ -427,6 +431,7 @@ async function openProject(origin?: unknown) {
         ...cached,
         transcript: track.transcript,
         role: track.role,
+        origin: track.origin,
         ...(track.sentenceGroupId
           ? { sentenceGroupId: track.sentenceGroupId }
           : {}),
@@ -605,6 +610,53 @@ async function demoProject(origin?: unknown): Promise<MixProject> {
 }
 
 function registerIPC() {
+  handle("studio:epidemicStatus", () => epidemic.status());
+  handle("studio:epidemicCatalog", () => epidemicCatalog());
+  handle("studio:epidemicConnect", (key: unknown, requestId: unknown) =>
+    epidemic.run(requestId, (signal) => epidemic.connect(key, signal)),
+  );
+  handle("studio:epidemicDisconnect", () => epidemic.disconnect());
+  handle("studio:epidemicCancel", (requestId: unknown) =>
+    epidemic.cancel(requestId),
+  );
+  handle("studio:epidemicSearch", (value: unknown, requestId: unknown) =>
+    epidemic.run(requestId, (signal) => epidemic.search(value, signal)),
+  );
+  handle("studio:epidemicPreview", (value: unknown, requestId: unknown) =>
+    epidemic.run(requestId, (signal) =>
+      withFileOperation((queuedSignal) =>
+        epidemic.preview(value, AbortSignal.any([signal, queuedSignal])),
+      ),
+    ),
+  );
+  handle(
+    "studio:epidemicImport",
+    (value: unknown, origin: unknown, requestId: unknown) => {
+      const projectId = checkedProjectId(origin);
+      if (!projectId)
+        throw new Error("Choose the project receiving this audio.");
+      const project = workspace.project(projectId);
+      if (
+        !project?.tracks.some(
+          (track) => (track.role ?? "voiceover") === "voiceover",
+        )
+      )
+        throw new Error(
+          "Import and verify your first voiceover before adding Epidemic Sound music or effects.",
+        );
+      return epidemic.run(requestId, (signal) =>
+        withFileOperation(
+          (queuedSignal, report) =>
+            epidemic.import(
+              value,
+              AbortSignal.any([signal, queuedSignal]),
+              report,
+            ),
+          projectId,
+        ),
+      );
+    },
+  );
   handle("studio:preferences", () => preferences.get());
   handle("studio:dependencies", () => checkDependencies(cacheDirectory));
   handle("studio:codexModels", () => discoverCodexModels());
@@ -938,6 +990,8 @@ function registerIPC() {
       ffmpeg: "https://ffmpeg.org/download.html",
       whisperx: "https://github.com/m-bain/whisperX",
       soundtouch: "https://www.surina.net/soundtouch/",
+      "epidemic-key": "https://www.epidemicsound.com/account/api-keys",
+      "epidemic-docs": "https://developers.epidemicsound.com/docs/mcp/",
     };
     if (typeof target !== "string" || !Object.hasOwn(links, target))
       throw new Error("Unknown dependency.");
@@ -1128,6 +1182,12 @@ app
     media = new MediaStore(root);
     await media.initialize();
     preferences = new PreferencesStore(root);
+    epidemic = new EpidemicService(root, media, {
+      available: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (value) => safeStorage.encryptString(value),
+      decrypt: (value) => safeStorage.decryptString(value),
+    });
+    await epidemic.initialize();
     workspace = new WorkspaceStore(
       root,
       checkedProject,
@@ -1158,11 +1218,13 @@ app
           url.host !== "audio" ||
           url.search ||
           url.hash ||
-          !media.has(id) ||
+          (!media.has(id) && !epidemic.previewFile(id)) ||
           !["GET", "HEAD"].includes(request.method)
         )
           return new Response("Not found", { status: 404 });
-        const filename = media.filename(id);
+        const filename = media.has(id)
+          ? media.filename(id)
+          : epidemic.previewFile(id)!;
         const size = (await stat(filename)).size;
         const range = byteRange(request.headers.get("range"), size);
         if (!range)
@@ -1171,7 +1233,7 @@ app
             headers: { "Content-Range": `bytes */${size}` },
           });
         const headers = {
-          "Content-Type": "audio/wav",
+          "Content-Type": media.has(id) ? "audio/wav" : "audio/mpeg",
           "Accept-Ranges": "bytes",
           "Content-Length": String(range.end - range.start + 1),
           "Cache-Control": "private, max-age=31536000, immutable",
@@ -1220,6 +1282,7 @@ app.on("before-quit", (event) => {
   operation?.abort();
   fileOperations.cancel();
   previewControllers.forEach((controller) => controller.abort());
+  epidemic?.shutdown();
   // Give cancelled child processes time to exit, then flush the latest edit before quitting.
   const processes = Promise.allSettled([
     operationCompletion,
@@ -1232,6 +1295,7 @@ app.on("before-quit", (event) => {
     persistenceQueue.catch(() => undefined),
     workspace?.flush().catch(() => undefined),
     preferences?.flush().catch(() => undefined),
+    epidemic?.flush().catch(() => undefined),
   ]);
   void cleanup
     .catch(() => undefined)

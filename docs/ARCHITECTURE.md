@@ -6,7 +6,8 @@ Audio Mix Studio is an Electron app with a sandboxed React renderer. There is no
 React UI → typed context bridge → validated Electron IPC
                                      ├─ MediaStore → FFmpeg / FFprobe
                                      ├─ WhisperX worker → local Python + models
-                                     └─ Codex CLI → structured transcript grouping
+                                     ├─ Codex CLI → structured transcript grouping
+                                     └─ Epidemic Sound MCP → catalog and selected media
 ```
 
 ## Boundaries
@@ -22,6 +23,9 @@ React UI → typed context bridge → validated Electron IPC
 - `electron/workspace.ts`: validated workspace persistence, recovery backups, and serialized project-scoped media tasks.
 - `electron/main.ts`: native dialogs, trusted sender checks, operation ownership, portable project persistence, autosave, and opaque media URLs.
 - `electron/media.ts`: immutable import copies, normalization, waveform peaks, byte-range serving, audio slices, and sample-accurate master rendering.
+- `electron/epidemic.ts`: authenticated catalog operations, encrypted account credential storage, request cancellation, validated provider results, and bounded media downloads.
+- `src/ui/EpidemicBrowser.tsx` and `EpidemicKeyDialog.tsx`: discovery, inline audition, verified key setup, and the shared settings connection form.
+- `src/shared/epidemicCatalog.ts`: dated official public catalog options; the MCP server provides filters but no taxonomy-list tool.
 - `electron/integrations/`: binary discovery, bounded subprocesses, checksummed downloads, runtime locking, transcription, and constrained Codex output validation.
 - `resources/transcription/`: the pinned WhisperX worker, Python dependency lock, model manifest, bootstrap manifest, and original MIT attribution.
 
@@ -48,6 +52,16 @@ Sources carry an optional role (`voiceover`, `music`, `soundtrack`); missing rol
 The optional `soundMix` contains ordered lanes and source-referenced placements. Exactly one lane is the protected voiceover reference; it renders the current narration assembly. Initial projects display Music 1 and Soundtrack 1 as well. Placements have absolute output offsets, sample-rounded source trims, and settings. Internal source-relative keyframes divide a placement into sections, each with its own constant pitch-preserving speed, gain, and fades. Updating speed changes all downstream section offsets in that placement. Voiceover speed updates its sentence group and recomputes the concatenated narration, preserving explicit joint pauses without creating new gaps. Music/effect offsets remain absolute.
 
 Fades include duration, delay from the beginning/end of the section, a curve preset, and a custom exponent. The shared render plan combines narration with overlapping music/effect sections. Preview and export use the same gain/timing rules. The master overview includes music/effect bands and extends to the longest audible placement. The arranger dialog stages edits in a local draft; Save creates one undoable edit and Cancel discards it. Lane deletion removes only its placements after confirmation, retaining imported source assets.
+
+## Epidemic Sound
+
+The optional integration uses the documented personal MCP Server API key, not a Developer Portal API key. Only Electron communicates with the fixed authenticated MCP endpoint. The official TypeScript MCP client negotiates Streamable HTTP and handles JSON/SSE responses. Each request has a validated cancellation ID and a bounded lifetime; closing a browser or superseding a search invalidates late callbacks.
+
+Key setup verifies actual service access before confirming a connection or replacing the previous working key. The credential is kept separately from workspace/project data, encrypted through Electron safeStorage on macOS and written atomically with restrictive permissions. Without encrypted storage, a connection is session-only. Read APIs expose connection state and verification time, never the saved key. Removing a connection cancels its outstanding operations. No credential is read automatically from Codex configuration by the application.
+
+Search exposes the actual music and effect filters, sort orders, cursor pagination, similar-audio tools, and external-reference discovery. Canonical genre/mood/category choices come from a dated official public-catalog snapshot; themes become descriptive topic searches. Genre/decade/region choices share the MCP taxonomy match operator, with an explicit control rather than silently combining unrelated dimensions. Request validation rejects unsupported options and invalid ranges. Signed media URLs remain transient, are restricted to official hosts, and are fetched without the MCP Authorization header. HQ downloads enter the existing immutable normalization/import pipeline and carry validated catalog provenance. The transient preview cache is separate from project assets and bounded; auditions do not permanently add full-song WAVs to the project media cache.
+
+Music/effect source buttons open a provider/local source chooser with an existing-library shortcut. The first voiceover gate disables catalog imports into an empty narration project. Both local and catalog imports feed the same type/audition dialog, then an undoable draft arranger. Cancelling the arranger retains the imported source in the library but does not adopt its draft placements. Active-tab changes stop audition playback; async operations retain their origin project.
 
 ## Persistence
 

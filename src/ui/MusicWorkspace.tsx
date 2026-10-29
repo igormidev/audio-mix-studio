@@ -61,6 +61,14 @@ export interface MusicWorkspaceProps {
   position: number;
   onSeek: (time: number) => void;
   onEdit: (update: (project: MixProject) => MixProject) => void;
+  onAddAudio?: (lane: MixLane) => void;
+  arrangementRequest?: {
+    token: number;
+    laneId: string;
+    trackIds?: string[];
+    at?: number;
+  } | null;
+  onArrangementHandled?: () => void;
 }
 
 type Selection =
@@ -73,6 +81,9 @@ export function MusicWorkspace({
   position,
   onSeek,
   onEdit,
+  onAddAudio,
+  arrangementRequest,
+  onArrangementHandled,
 }: MusicWorkspaceProps) {
   const mix = soundMix(project);
   const narration = useMemo(() => masterClips(project), [project]);
@@ -85,6 +96,32 @@ export function MusicWorkspace({
     laneId: string;
     project: MixProject;
   } | null>(null);
+  const handledArrangement = useRef(0);
+  useEffect(() => {
+    if (
+      !arrangementRequest ||
+      handledArrangement.current === arrangementRequest.token
+    )
+      return;
+    handledArrangement.current = arrangementRequest.token;
+    const lane = soundMix(project).lanes.find(
+      (lane) => lane.id === arrangementRequest.laneId,
+    );
+    if (lane && lane.kind !== "voiceover") {
+      let draft = project;
+      let at = Math.max(0, arrangementRequest.at ?? 0);
+      for (const id of arrangementRequest.trackIds ?? []) {
+        const track = draft.tracks.find(
+          (track) => track.id === id && track.role === lane.kind,
+        );
+        if (!track) continue;
+        draft = addMixPlacement(draft, lane.id, id, at);
+        at += track.duration;
+      }
+      setStaging({ laneId: lane.id, project: draft });
+    }
+    onArrangementHandled?.();
+  }, [arrangementRequest, project, onArrangementHandled]);
   const [error, setError] = useState("");
   const viewport = useRef<HTMLDivElement>(null);
   const totalDuration = Math.max(10, mixDuration(project) + 3);
@@ -380,7 +417,9 @@ export function MusicWorkspace({
                           aria-label={`Add audio to ${lane.name}`}
                           disabled={busy}
                           onClick={() =>
-                            setStaging({ laneId: lane.id, project })
+                            onAddAudio
+                              ? onAddAudio(lane)
+                              : setStaging({ laneId: lane.id, project })
                           }
                         >
                           <Plus size={13} />
@@ -496,7 +535,11 @@ export function MusicWorkspace({
                       <button
                         className="music-empty-lane"
                         disabled={busy}
-                        onClick={() => setStaging({ laneId: lane.id, project })}
+                        onClick={() =>
+                          onAddAudio
+                            ? onAddAudio(lane)
+                            : setStaging({ laneId: lane.id, project })
+                        }
                       >
                         <Plus size={17} />
                         <span>

@@ -1223,6 +1223,34 @@ function parseTimedText(
   };
 }
 
+function parseAudioOrigin(value: unknown): NonNullable<AudioTrack["origin"]> {
+  const input = object(value, "Audio origin");
+  if (
+    input.provider !== "epidemic-sound" ||
+    (input.kind !== "music" && input.kind !== "soundtrack") ||
+    (input.format !== "WAV" && input.format !== "MP3") ||
+    !["FULL", "BASS", "DRUMS", "INSTRUMENTS"].includes(input.stem as string)
+  )
+    throw new Error("Invalid Epidemic Sound audio origin.");
+  const sourceId = string(input.id, "Epidemic Sound source ID", 36);
+  if (
+    !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(
+      sourceId,
+    )
+  )
+    throw new Error("Invalid Epidemic Sound source ID.");
+  return {
+    provider: "epidemic-sound",
+    id: sourceId,
+    kind: input.kind,
+    format: input.format,
+    stem: input.stem as string,
+    artists: array(input.artists, "Epidemic Sound artists", 50).map((value) =>
+      string(value, "Epidemic Sound artist", 300),
+    ),
+  };
+}
+
 function parseTrack(value: unknown, label: string): AudioTrack {
   const track = object(value, label);
   const duration = number(track.duration, `${label} duration`);
@@ -1265,6 +1293,9 @@ function parseTrack(value: unknown, label: string): AudioTrack {
     mediaUrl: string(track.mediaUrl, `${label} media URL`, 16_384),
     ...(transcript ? { transcript } : {}),
     ...(track.role !== undefined ? { role: validAudioRole(track.role) } : {}),
+    ...(track.origin !== undefined
+      ? { origin: parseAudioOrigin(track.origin) }
+      : {}),
     ...(track.sentenceGroupId !== undefined
       ? {
           sentenceGroupId: string(

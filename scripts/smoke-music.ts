@@ -65,6 +65,11 @@ try {
       });
     }, file);
     await page.getByRole("button", { name: "Add audio", exact: true }).click();
+    const sourceChoice = page.getByRole("dialog", {
+      name: /^Add (music|a sound effect)$/,
+    });
+    if (await sourceChoice.count())
+      await sourceChoice.getByRole("button", { name: /This Mac/ }).click();
     const dialog = page.getByRole("dialog", {
       name: "What are we listening to?",
     });
@@ -88,12 +93,31 @@ try {
     await expect(
       page.getByRole("button", { name: "Add audio", exact: true }),
     ).toBeEnabled();
+    const autoArranger = page.getByRole("dialog", {
+      name: kind === "Music" ? "Music 1" : "Soundtrack 1",
+      exact: true,
+    });
+    await expect(autoArranger).toBeVisible();
+    await expect(autoArranger.locator(".music-clip")).toHaveCount(1);
+    await autoArranger
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click();
+  };
+  const openArranger = async (name: string) => {
+    await page
+      .getByRole("button", { name: `Add audio to ${name}`, exact: true })
+      .click();
+    await page
+      .getByRole("dialog", { name: /^Add (music|a sound effect)$/ })
+      .getByRole("button", {
+        name: "Use audio already in this project",
+        exact: true,
+      })
+      .click();
   };
   await importFile(musicFile, "Music");
   await expect(page.locator(".music-lane")).toHaveCount(3);
-  await page
-    .getByRole("button", { name: "Add audio to Music 1", exact: true })
-    .click();
+  await openArranger("Music 1");
   let arranger = page.getByRole("dialog", { name: "Music 1", exact: true });
   await arranger
     .getByRole("button", {
@@ -104,9 +128,7 @@ try {
   await expect(arranger.locator(".music-clip")).toHaveCount(1);
   await arranger.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.locator(".music-lane-music .music-clip")).toHaveCount(0);
-  await page
-    .getByRole("button", { name: "Add audio to Music 1", exact: true })
-    .click();
+  await openArranger("Music 1");
   arranger = page.getByRole("dialog", { name: "Music 1", exact: true });
   await arranger
     .locator(".music-library-source")
@@ -119,9 +141,7 @@ try {
     .click();
   await expect(page.locator(".music-lane-music .music-clip")).toHaveCount(1);
   await importFile(effectFile, "Sound effect");
-  await page
-    .getByRole("button", { name: "Add audio to Soundtrack 1", exact: true })
-    .click();
+  await openArranger("Soundtrack 1");
   arranger = page.getByRole("dialog", { name: "Soundtrack 1", exact: true });
   await arranger
     .getByRole("button", {

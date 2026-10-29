@@ -40,6 +40,7 @@ import type {
   AudioSegment,
   AudioRole,
   AudioTrack,
+  MixLane,
   DependencyStatus,
   JointSettings,
   MixProject,
@@ -61,9 +62,17 @@ import {
   setJointDefaults,
   effectiveJointSettings,
 } from "../domain/project";
-import { appendLibraryTracks, mixDuration } from "../domain/soundMix";
+import {
+  addMixLane,
+  appendLibraryTracks,
+  mixDuration,
+  soundMix,
+} from "../domain/soundMix";
 import { MusicWorkspace } from "./MusicWorkspace";
 import { ImportKindDialog } from "./ImportKindDialog";
+import { ImportSourceDialog } from "./ImportSourceDialog";
+import { EpidemicBrowser } from "./EpidemicBrowser";
+import type { EpidemicKind } from "../shared/epidemic";
 import { clock, secondsLabel } from "./format";
 import { Settings } from "./Settings";
 import { usePlayer } from "./usePlayer";
@@ -76,6 +85,7 @@ import { loadDependencies, rememberDependencies } from "./dependencies";
 type AudioDropTarget =
   | { kind: "take"; zone: "empty" | "sidebar" | "master" | "music" }
   | { kind: "sentence"; groupId: string };
+type SourceRequest = { kind: EpidemicKind; laneId?: string };
 
 export interface WorkspaceProps {
   editor: EditorState;
@@ -119,10 +129,26 @@ export const Workspace = memo(function Workspace({
   const [dropTarget, setDropTarget] = useState<AudioDropTarget | null>(null);
   const [libraryTab, setLibraryTab] = useState<AudioRole>("voiceover");
   const [pendingImport, setPendingImport] = useState<AudioTrack | null>(null);
+  const [pendingRole, setPendingRole] = useState<AudioRole>("voiceover");
+  const [sourceRequest, setSourceRequest] = useState<SourceRequest | null>(
+    null,
+  );
+  const [epidemicRequest, setEpidemicRequest] = useState<SourceRequest | null>(
+    null,
+  );
+  const [epidemicWorking, setEpidemicWorking] = useState(false);
+  const epidemicWorkingRef = useRef(false);
+  const [arrangementRequest, setArrangementRequest] = useState<{
+    token: number;
+    laneId: string;
+    trackIds?: string[];
+    at?: number;
+  } | null>(null);
+  const arrangementToken = useRef(0);
   const importChoice = useRef<((role: AudioRole | null) => void) | null>(null);
   const [masterTool, setMasterTool] = useState<"seek" | "cut">("seek");
   const editorViewport = useRef<HTMLElement>(null);
-  const busy = working;
+  const busy = working || epidemicWorking;
   const operation = useRef(false);
   const clips = useMemo(() => masterClips(project), [project]);
   const duration = useMemo(() => mixDuration(project), [project]);
@@ -258,7 +284,7 @@ export const Workspace = memo(function Workspace({
       } finally {
         operation.current = false;
         setBusy(false);
-        onBusyChange(project.id, false);
+        onBusyChange(project.id, epidemicWorkingRef.current);
         setProgress(null);
         void refresh();
       }
@@ -280,10 +306,11 @@ export const Workspace = memo(function Workspace({
     importChoice.current = null;
   }, []);
   const classify = useCallback(
-    (track: AudioTrack) =>
+    (track: AudioTrack, role: AudioRole = "voiceover") =>
       new Promise<AudioRole | null>((resolve) => {
         importChoice.current = resolve;
         setPendingImport(track);
+        setPendingRole(role);
         setProgress(null);
       }),
     [],
@@ -294,12 +321,70 @@ export const Workspace = memo(function Workspace({
     },
     [],
   );
+  const acceptImported = useCallback(
+    (
+      track: AudioTrack,
+      role: AudioRole,
+      sentenceGroupId?: string,
+      preferredLaneId?: string,
+    ) => {
+      if (
+        !projectRef.current.tracks.some(
+          (source) => (source.role ?? "voiceover") === "voiceover",
+        )
+      )
+        throw new Error(
+          "Import and verify your first voiceover before adding catalog audio.",
+        );
+      let next =
+        role === "voiceover" && sentenceGroupId
+          ? appendSentenceAlternatives(projectRef.current, sentenceGroupId, [
+              { ...track, role },
+            ])
+          : appendLibraryTracks(projectRef.current, [track], role);
+      let laneId: string | undefined;
+      if (role !== "voiceover") {
+        let lane =
+          soundMix(next).lanes.find(
+            (lane) => lane.id === preferredLaneId && lane.kind === role,
+          ) ?? soundMix(next).lanes.find((lane) => lane.kind === role);
+        if (!lane) {
+          next = addMixLane(next, role);
+          lane = soundMix(next).lanes.at(-1)!;
+        }
+        laneId = lane.id;
+      }
+      adopt(next);
+      setLibraryTab(role);
+      setTab(role === "voiceover" ? "choices" : "music");
+      setNotice(
+        role === "voiceover"
+          ? "Voiceover added. Group sentences to compare takes."
+          : "Audio added. Arrange it on your track, then save.",
+      );
+      return laneId;
+    },
+    [adopt],
+  );
+  const queueArrangement = useCallback(
+    (laneId: string, trackIds?: string[]) => {
+      setTab("music");
+      setArrangementRequest({
+        token: ++arrangementToken.current,
+        laneId,
+        trackIds,
+        at: player.position,
+      });
+    },
+    [player.position],
+  );
   const importAudio = useCallback(
-    (paths?: string[], sentenceGroupId?: string) => {
+    (paths?: string[], sentenceGroupId?: string, context?: SourceRequest) => {
       void run(async () => {
         const tracks = paths
           ? await window.studio.importPaths(paths, project.id)
           : await window.studio.importAudio(project.id);
+        let arranged: { laneId: string; trackIds: string[] } | undefined;
         for (const track of tracks) {
           const hasVoiceover = projectRef.current.tracks.some(
             (source) => (source.role ?? "voiceover") === "voiceover",
@@ -323,28 +408,36 @@ export const Workspace = memo(function Workspace({
             setTab("choices");
             continue;
           }
-          const role = await classify(track);
+          const role = await classify(track, context?.kind ?? "voiceover");
           if (!role) break;
-          const next =
-            role === "voiceover" && sentenceGroupId
-              ? appendSentenceAlternatives(
-                  projectRef.current,
-                  sentenceGroupId,
-                  [{ ...track, role }],
-                )
-              : appendLibraryTracks(projectRef.current, [track], role);
-          adopt(next);
-          setLibraryTab(role);
-          setTab(role === "voiceover" ? "choices" : "music");
-          setNotice(
-            role === "voiceover"
-              ? "Voiceover added. Group sentences to compare takes."
-              : "Added to your library. Use + on a mix track to place it in the timeline.",
+          const laneId = acceptImported(
+            track,
+            role,
+            sentenceGroupId,
+            context?.laneId,
           );
+          arranged = laneId
+            ? {
+                laneId,
+                trackIds: [
+                  ...(arranged?.laneId === laneId ? arranged.trackIds : []),
+                  track.id,
+                ],
+              }
+            : undefined;
         }
+        if (arranged) queueArrangement(arranged.laneId, arranged.trackIds);
       });
     },
-    [run, adopt, status, project.id, classify],
+    [
+      run,
+      adopt,
+      status,
+      project.id,
+      classify,
+      acceptImported,
+      queueArrangement,
+    ],
   );
   const addSentenceAudio = useCallback(
     (groupId: string, paths?: string[]) => {
@@ -354,6 +447,67 @@ export const Workspace = memo(function Workspace({
     },
     [importAudio],
   );
+  const requestSource = useCallback(
+    (lane?: MixLane) => {
+      if (operation.current || epidemicWorkingRef.current) return;
+      playerStop();
+      const kind = lane?.kind ?? libraryTab;
+      if (kind === "voiceover") importAudio();
+      else setSourceRequest({ kind, laneId: lane?.id });
+    },
+    [importAudio, libraryTab, playerStop],
+  );
+  const chooseSource = useCallback(
+    (source: "epidemic" | "computer" | "library" | null) => {
+      const context = sourceRequest;
+      setSourceRequest(null);
+      if (!context || !source) return;
+      if (source === "epidemic") setEpidemicRequest(context);
+      else if (source === "computer")
+        importAudio(undefined, undefined, context);
+      else {
+        const lane =
+          soundMix(projectRef.current).lanes.find(
+            (lane) => lane.id === context.laneId && lane.kind === context.kind,
+          ) ??
+          soundMix(projectRef.current).lanes.find(
+            (lane) => lane.kind === context.kind,
+          );
+        if (lane) queueArrangement(lane.id);
+      }
+    },
+    [sourceRequest, importAudio, queueArrangement],
+  );
+  const epidemicBusy = useCallback(
+    (value: boolean) => {
+      epidemicWorkingRef.current = value;
+      setEpidemicWorking(value);
+      onBusyChange(project.id, value || operation.current);
+    },
+    [onBusyChange, project.id],
+  );
+  const selectEpidemic = useCallback(
+    (track: AudioTrack, kind: EpidemicKind) => {
+      const context = epidemicRequest;
+      setEpidemicRequest(null);
+      void run(async () => {
+        if (
+          !projectRef.current.tracks.some(
+            (source) => (source.role ?? "voiceover") === "voiceover",
+          )
+        )
+          throw new Error(
+            "Import and verify your first voiceover before adding catalog audio.",
+          );
+        const role = await classify(track, kind);
+        if (!role) return;
+        const laneId = acceptImported(track, role, undefined, context?.laneId);
+        if (laneId) queueArrangement(laneId, [track.id]);
+      });
+    },
+    [epidemicRequest, run, classify, acceptImported, queueArrangement],
+  );
+  const arrangementHandled = useCallback(() => setArrangementRequest(null), []);
   const save = useCallback(
     (saveAs = false) => {
       if (operation.current) return;
@@ -393,6 +547,8 @@ export const Workspace = memo(function Workspace({
     void run(async () => {
       const next = await window.studio.demoProject(project.id);
       adopt({ ...next, id: projectRef.current.id }, true);
+      setTab("choices");
+      setLibraryTab("voiceover");
       setNotice("Sample project opened.");
     });
   }, [run, adopt, project.id]);
@@ -570,6 +726,8 @@ export const Workspace = memo(function Workspace({
     target: EventTarget | null,
   ): AudioDropTarget | null => {
     if (!active || operation.current || settings || help || confirmAlign)
+      return null;
+    if (target instanceof Element && target.closest('[role="dialog"]'))
       return null;
     if (!project.tracks.length) return { kind: "take", zone: "empty" };
     if (!(target instanceof Element)) return null;
@@ -757,7 +915,7 @@ export const Workspace = memo(function Workspace({
         <button
           className="add-take"
           disabled={busy}
-          onClick={() => importAudio()}
+          onClick={() => requestSource()}
         >
           <Plus size={16} />
           Add audio
@@ -946,7 +1104,10 @@ export const Workspace = memo(function Workspace({
               aria-controls={`choices-panel-${project.id}`}
               aria-selected={tab === "choices"}
               className={tab === "choices" ? "active" : ""}
-              onClick={() => setTab("choices")}
+              onClick={() => {
+                setTab("choices");
+                setLibraryTab("voiceover");
+              }}
             >
               <Layers3 size={16} />
               Sentence choices
@@ -1182,6 +1343,9 @@ export const Workspace = memo(function Workspace({
                   position={player.position}
                   onSeek={player.seek}
                   onEdit={edit}
+                  onAddAudio={requestSource}
+                  arrangementRequest={arrangementRequest}
+                  onArrangementHandled={arrangementHandled}
                 />
               </>
             )}
@@ -1200,7 +1364,30 @@ export const Workspace = memo(function Workspace({
         <ImportKindDialog
           key={pendingImport.id}
           track={pendingImport}
+          initialRole={pendingRole}
           onChoose={chooseImportKind}
+        />
+      )}
+      {active && sourceRequest && (
+        <ImportSourceDialog
+          kind={sourceRequest.kind}
+          hasVoiceover={project.tracks.some(
+            (track) => (track.role ?? "voiceover") === "voiceover",
+          )}
+          hasLibrary={project.tracks.some(
+            (track) => track.role === sourceRequest.kind,
+          )}
+          onChoose={chooseSource}
+        />
+      )}
+      {epidemicRequest && (
+        <EpidemicBrowser
+          initialKind={epidemicRequest.kind}
+          projectId={project.id}
+          active={active}
+          onClose={() => setEpidemicRequest(null)}
+          onSelect={selectEpidemic}
+          onBusyChange={epidemicBusy}
         />
       )}
       {active && settings && (
@@ -1220,6 +1407,7 @@ export const Workspace = memo(function Workspace({
             setHelp(true);
           }}
           onRefresh={() => void refresh(true)}
+          onConnectionBusyChange={epidemicBusy}
           onSetup={() =>
             void run(async () => {
               setStatus(

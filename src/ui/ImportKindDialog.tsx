@@ -38,8 +38,10 @@ const kinds = [
 export function ImportKindDialog({
   track,
   onChoose,
+  initialRole = "voiceover",
 }: {
   track: AudioTrack;
+  initialRole?: AudioRole;
   onChoose: (role: AudioRole | null) => void;
 }) {
   const audio = useRef<HTMLAudioElement>(null);
@@ -47,7 +49,7 @@ export function ImportKindDialog({
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [rate, setRate] = useState(1);
-  const [role, setRole] = useState<AudioRole>("voiceover");
+  const [role, setRole] = useState<AudioRole>(initialRole);
   const [error, setError] = useState("");
   useEffect(() => {
     const element = dialog.current;

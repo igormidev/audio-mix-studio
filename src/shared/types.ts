@@ -1,3 +1,5 @@
+import type { EpidemicAPI } from "./epidemic";
+
 export const transcriptionModels = [
   "tiny",
   "base",
@@ -29,6 +31,14 @@ export interface AudioTrack {
   /** A local replacement choice for this sentence, never a complete-script take. */
   sentenceGroupId?: string;
   role?: AudioRole;
+  origin?: {
+    provider: "epidemic-sound";
+    id: string;
+    kind: "music" | "soundtrack";
+    artists: string[];
+    stem: string;
+    format: "WAV" | "MP3";
+  };
 }
 export type AudioRole = "voiceover" | "music" | "soundtrack";
 export type FadeCurve =
@@ -177,7 +187,7 @@ export interface OperationProgress {
   fraction?: number;
   trackId?: string;
 }
-export interface StudioAPI {
+export interface StudioAPI extends EpidemicAPI {
   preferences(): Promise<StudioPreferences>;
   codexModels(): Promise<CodexModelInfo[]>;
   restoreWorkspace(): Promise<WorkspaceSession | null>;
@@ -218,7 +228,13 @@ export interface StudioAPI {
   exportAlignment(project: MixProject): Promise<string | null>;
   demoProject(projectId?: string): Promise<MixProject>;
   openExternal(
-    target: "codex" | "ffmpeg" | "whisperx" | "soundtouch",
+    target:
+      | "codex"
+      | "ffmpeg"
+      | "whisperx"
+      | "soundtouch"
+      | "epidemic-key"
+      | "epidemic-docs",
   ): Promise<void>;
   onProgress(
     listener: (progress: OperationProgress | null) => void,

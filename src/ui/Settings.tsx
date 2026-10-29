@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   Check,
   CircleHelp,
@@ -20,6 +21,7 @@ import type {
 } from "../shared/types";
 import { transcriptionModels } from "../shared/types";
 import { CodexSettings } from "./CodexSettings";
+import { EpidemicSettings } from "./EpidemicKeyDialog";
 export function Settings({
   project,
   status,
@@ -35,6 +37,7 @@ export function Settings({
   onSetup,
   onRefresh,
   onExportJSON,
+  onConnectionBusyChange,
 }: {
   project: MixProject;
   status: DependencyStatus | null;
@@ -50,7 +53,9 @@ export function Settings({
   onSetup: () => void;
   onRefresh: () => void;
   onExportJSON: () => void;
+  onConnectionBusyChange?: (busy: boolean) => void;
 }) {
+  const [connectionBusy, setConnectionBusy] = useState(false);
   return (
     <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
       <section
@@ -138,7 +143,7 @@ export function Settings({
             disabled={busy}
             onClick={onSetup}
           >
-            {busy ? (
+            {busy && !connectionBusy ? (
               <LoaderCircle className="spin" size={15} />
             ) : (
               <Download size={15} />
@@ -146,6 +151,13 @@ export function Settings({
             Prepare model
           </button>
         </div>
+        <EpidemicSettings
+          disabled={busy}
+          onBusyChange={(value) => {
+            setConnectionBusy(value);
+            onConnectionBusyChange?.(value);
+          }}
+        />
         <CodexSettings
           value={project.codex}
           disabled={busy}
@@ -267,7 +279,7 @@ export function Settings({
             Export alignment JSON
           </button>
           <div className="settings-footer-actions">
-            {busy && onCancel && (
+            {busy && !connectionBusy && onCancel && (
               <button className="button secondary" onClick={onCancel}>
                 Cancel operation
               </button>

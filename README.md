@@ -20,6 +20,8 @@ Built for faceless YouTube channels, voiceovers, and anyone who has ever thought
 - **Control speed and joints.** Change speed from 0.5x to 2x in 1% steps without changing pitch, using SoundTouch—the tempo engine used by Audacity’s Change Tempo effect. Hover a divider to set the preceding fade-out, extra pause, and following fade-in. All defaults start at zero.
 - **Match meaning across scripts.** Codex groups the same idea even when the wording changes. Extra sentences become their own groups, with only the takes that contain them.
 - **Build a soundtrack.** Open **Music & Sound Track** for a synchronized waveform timeline with one voiceover reference, Music 1, and Soundtrack 1. Add music/effect tracks, drag their names to reorder, and confirm before deleting.
+- **Browse Epidemic Sound inside the studio.** Choose Epidemic Sound or This Mac when adding music/effects. Search music and sound effects, explore themes, filter the official catalog, find similar tracks, and audition without leaving the selection dialog.
+- **Connect your own music account.** Enter your account MCP Server API key in the browser or Studio settings. The app verifies it before confirming the connection; saved keys use macOS encryption and stay out of projects and exports.
 - **Shape each clip.** Stage clips in a track’s **+** dialog, drag them into position, and save. Click a clip for volume, speed, fade timing, illustrated fade curves, and a custom curve control.
 - **Edit between keyframes.** Add a keyframe at the main cursor to define another section. Each section has its own speed, volume, and fades; later sections move with its duration. Voiceover controls change sentence speed and keep neighboring narration snapped together.
 - **Hear the final sequence.** The master stays at the top, with playback, seeking, and color-coded source clips. Scroll or pinch over it to zoom; scroll horizontally to pan. Hover a clip to read its full sentence. Take cards show each source’s share of the audible mix.
@@ -93,12 +95,24 @@ Explicit Save still produces a portable project and audio folder. The workspace 
 1. **Import your narration.** The first file must pass real WhisperX transcription and sentence grouping before it enters the project. A failed analysis leaves the project unchanged. WAV, MP3, M4A, AAC, FLAC, OGG, Opus, AIFF, and other common audio formats are supported. Imports are local copies; originals stay untouched.
 2. **Classify later imports.** Each subsequent file opens a listening dialog: play/pause, seek, skip back/forward, and audition at up to 2x. Choose **Voiceover**, **Sound effect**, or **Music**. Voiceovers become narration choices; music and effects stay in their own libraries. Use the sidebar icon tabs to switch libraries. For additional full narration takes, click **Group sentences**; progress is visible and cancellable.
 3. **Choose each sentence.** Preview the variations, then click the card you prefer. A sentence that appears in only one recording has one option. The first available take is selected initially; AI does not pretend to judge sound quality from text.
-4. **Add music and sound effects.** Open **Music & Sound Track**, click **+** beside a track, and drag library audio onto its timeline. Arrange clips and save. Zoom applies across all tracks and the main cursor stays synchronized with the master. Click a music/effect clip to edit its settings or add keyframes. The voiceover lane exposes speed only; sentence choices remain the narration editor.
+4. **Add music and sound effects.** Open **Music & Sound Track**, click **+** beside a track, and choose **Epidemic Sound**, **This Mac**, or audio already in your project. New audio goes through the same listening/type dialog, followed by a draft track arrangement. Drag clips into place and save; Cancel discards that arrangement. Zoom applies across all tracks and the main cursor stays synchronized with the master. Click a music/effect clip to edit its settings or add keyframes. The voiceover lane exposes speed only; sentence choices remain the narration editor.
 5. **Export master.** Use the button below **Add audio** in the sidebar. Choose WAV for editing in your video app, or MP3 for a smaller file. Tabs save automatically; **File → Save project** (⌘S) creates a portable copy.
 
 Open **Quick guide → Let’s make a mix** for three real, locally synthesized takes with shared and unique sentences. The sample uses an empty tab if one is available; otherwise it opens a new tab. It never replaces a mix containing audio. Quick guide appears above Studio settings until the first successful master export, and remains available inside Studio settings afterward. Demo groups are prepared examples; they are labeled as a demo and do not imply an AI analysis ran.
 
 ![Music and sound-effect timeline](docs/screenshots/music-workspace.png)
+
+### Epidemic Sound
+
+Use your **MCP Server API key** from [Account → API keys](https://www.epidemicsound.com/account/api-keys). This is the personal-account integration documented by [Epidemic Sound](https://developers.epidemicsound.com/docs/mcp/); Developer Portal API keys belong to a separate service and do not work here. You can connect, verify a replacement, or remove the saved connection in **Studio settings → Epidemic Sound**. A failed verification keeps your existing working key. If encrypted storage is unavailable, the connection lasts only for that app session.
+
+The music browser starts with popular music and theme suggestions. Search by titles/keywords, describe a scene, or find music resembling an artist/song. Filters include genres, moods, featured instruments, vocals, BPM, duration, musical key, decade, world style, and artists present in the results. Sound effects have their own searchable category hierarchy and duration filter. Match controls explain whether selected categories must all match, may match any choice, or should be excluded. Sort results, load more, or find similar audio from a result.
+
+The genre, mood, and effect-category choices are a dated snapshot of canonical links from Epidemic's official public catalog. Themes run descriptive searches rather than loading official playlists; the current MCP server does not expose playlist/category-list tools. Instrument and world-style suggestions are limited to documented, verified options. See [integration details and source documentation](docs/EPIDEMIC_SOUND.md).
+
+Preview plays directly in the catalog dialog, with seeking, skip controls, speed, and volume. Music can be auditioned and imported as the full mix or an available bass/drums/instruments stem. **Add** requests the selected WAV or MP3 download, then opens the existing audio classification and track arrangement flow. Previews use the provider's preview audio; project imports use its high-quality download. Download access depends on your Epidemic subscription. Your first project source must still be a verified voiceover.
+
+![Epidemic Sound catalog and inline audition](docs/screenshots/epidemic-sound.png)
 
 ### A few useful details
 
@@ -144,11 +158,14 @@ App data lives at:
   last-session.json      previous-version session, retained during migration
   preferences.json       whether a master has ever been exported
   transcription/         Python runtime, model downloads, and cache
+  epidemic-credentials.json encrypted personal Epidemic Sound connection
 ```
 
 Upgrading preserves and migrates the previous session. Restore validates each tab independently: a missing or unreadable cached source silently omits that tab while the other tabs remain available. Deleting the original download does not affect the app’s imported copy. Future incompatible workspace formats start fresh; incompatible tabs are omitted without discarding compatible tabs. Before replacing an unreadable or incompatible snapshot, the app preserves an exclusive recovery copy. The first-export preference survives workspace resets.
 
 Explicit **Save** creates `My mix.mixstudio` and `My mix.assets/` beside it. Keep both together when moving or backing up a project. The JSON contains your transcript and selections; the assets folder contains copied source audio. Saved portable projects do not depend on the original download folder or the app’s media cache.
+
+When connected to Epidemic Sound, your catalog searches and selected recording IDs are sent to its MCP service, and previews/downloads come from its official media hosts. Your narration is not uploaded to Epidemic Sound. The key is sent only to the authenticated service from Electron; it is never attached to media requests. Imported sources retain catalog/artist/stem provenance without signed download URLs or credentials.
 
 There is no app analytics or hosted storage. Downloading dependencies/model weights contacts their official distribution hosts; Codex uses its existing authentication and network connection. Do not commit personal audio, transcripts, project files, or model caches to GitHub.
 
@@ -174,9 +191,11 @@ npx tsx scripts/smoke-editing.ts   # compact editor, speed, joints, zoom, guide,
 npx tsx scripts/smoke-master-cuts.ts # master range cuts, cursor jumps, restore, sentence follow
 npx tsx scripts/smoke-snippets.ts  # sentence-only import/drop, history, export, recovery
 npx tsx scripts/smoke-first-voiceover.ts # real first-source speech rejection/verification
+npx tsx scripts/smoke-epidemic.ts    # live account connection, catalog/preview/import, encrypted storage
 npx tsx scripts/smoke-music.ts       # classified imports, multitrack, keyframes, export/recovery
 npx tsx scripts/smoke-recovery.ts  # per-tab missing media, future formats, export preference
 npx tsx scripts/smoke-installed.ts # installed /Applications bundle, minimal Finder PATH
+AUDIO_MIX_TEST_EPIDEMIC=1 npx tsx scripts/smoke-installed.ts # opt-in real account check in installed app
 ```
 
 Run native smoke scripts sequentially so generated speech and window-focus checks do not compete.

@@ -9,6 +9,19 @@ import type {
 } from "../src/shared/types";
 
 const api: StudioAPI = {
+  epidemicStatus: () => ipcRenderer.invoke("studio:epidemicStatus"),
+  epidemicConnect: (key, requestId) =>
+    ipcRenderer.invoke("studio:epidemicConnect", key, requestId),
+  epidemicDisconnect: () => ipcRenderer.invoke("studio:epidemicDisconnect"),
+  epidemicCatalog: () => ipcRenderer.invoke("studio:epidemicCatalog"),
+  epidemicSearch: (request, requestId) =>
+    ipcRenderer.invoke("studio:epidemicSearch", request, requestId),
+  epidemicPreview: (request, requestId) =>
+    ipcRenderer.invoke("studio:epidemicPreview", request, requestId),
+  epidemicImport: (request, projectId, requestId) =>
+    ipcRenderer.invoke("studio:epidemicImport", request, projectId, requestId),
+  epidemicCancel: (requestId) =>
+    ipcRenderer.invoke("studio:epidemicCancel", requestId),
   preferences: () => ipcRenderer.invoke("studio:preferences"),
   codexModels: () => ipcRenderer.invoke("studio:codexModels"),
   restoreWorkspace: () => ipcRenderer.invoke("studio:restoreWorkspace"),
@@ -62,8 +75,15 @@ const api: StudioAPI = {
     ipcRenderer.invoke("studio:alignment", project),
   demoProject: (projectId?: string) =>
     ipcRenderer.invoke("studio:demo", projectId),
-  openExternal: (target: "codex" | "ffmpeg" | "whisperx" | "soundtouch") =>
-    ipcRenderer.invoke("studio:external", target),
+  openExternal: (
+    target:
+      | "codex"
+      | "ffmpeg"
+      | "whisperx"
+      | "soundtouch"
+      | "epidemic-key"
+      | "epidemic-docs",
+  ) => ipcRenderer.invoke("studio:external", target),
   onProgress(listener: (progress: OperationProgress | null) => void) {
     const handler = (
       _event: Electron.IpcRendererEvent,

@@ -1,6 +1,6 @@
 {
   "name": "audio-mix-studio",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Pick your favorite sentence from every voice take. A local macOS narration editor powered by WhisperX and Codex.",
   "author": "Igor Miranda Souza",
   "license": "MIT",
@@ -24,6 +24,7 @@
   "dependencies": {
     "@fontsource-variable/manrope": "^5.2.8",
     "@fontsource/geist-mono": "^5.2.8",
+    "@modelcontextprotocol/client": "^2.4.0",
     "lucide-react": "^0.468.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
