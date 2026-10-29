@@ -102,7 +102,7 @@ async function chooseFilter(browser: Locator, group: string, label: string) {
 try {
   page = await app.firstWindow();
   page.on("pageerror", (error) => errors.push(redact(error.message)));
-  // Empty projects still require a real first narration before catalog imports.
+  // Setup stays available before narration; the voiceover gate applies to Add.
   await page
     .getByRole("tab", { name: "Music & Sound Track", exact: true })
     .click();
@@ -113,25 +113,43 @@ try {
     name: "Add music",
     exact: true,
   });
-  await expect(
-    emptyChoice.getByRole("button", { name: /Epidemic Sound/ }),
-  ).toBeDisabled();
-  await emptyChoice
-    .getByRole("button", { name: "Close audio source chooser" })
-    .click();
-  await page.getByRole("button", { name: "Quick guide", exact: true }).click();
-  await page
-    .getByRole("button", { name: "Let’s make a mix", exact: true })
-    .click();
-  await expect(page.locator(".sentence-row")).toHaveCount(4, {
-    timeout: 90_000,
+  const epidemicSource = emptyChoice.getByRole("button", {
+    name: /Epidemic Sound/,
   });
-  await page
-    .getByRole("tab", { name: "Music & Sound Track", exact: true })
-    .click();
-  let browser = await openBrowser("Music 1");
-  await browser.getByRole("button", { name: /I have an API key/ }).click();
+  await expect(epidemicSource).toBeEnabled();
+  await epidemicSource.click();
+  let browser = page.getByRole("dialog", {
+    name: "Epidemic Sound",
+    exact: true,
+  });
+  await expect(browser.getByLabel("Epidemic Sound API key")).toHaveAttribute(
+    "type",
+    "password",
+  );
+  await expect(
+    browser.getByRole("button", { name: "I have an API key", exact: true }),
+  ).toHaveCount(0);
+  await browser.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(browser).toHaveCount(0);
+  await expect
+    .poll(async () => (await savedWorkspace()).projects[0].tracks.length)
+    .toBe(0);
+  if ((await page.evaluate(() => window.studio.epidemicStatus())).connected)
+    throw new Error("Cancelling key entry created a connection.");
+  browser = await openBrowser("Music 1");
   await enterPrivateKey("invalid-epidemic-test-credential");
+  await browser
+    .getByRole("button", { name: "Verify and save key", exact: true })
+    .click();
+  await browser
+    .getByRole("button", { name: "Cancel verification", exact: true })
+    .click();
+  await expect(browser.getByLabel("Epidemic Sound API key")).toBeEnabled();
+  if ((await page.evaluate(() => window.studio.epidemicStatus())).connected)
+    throw new Error("Cancelling verification created a connection.");
+  await expect
+    .poll(async () => (await savedWorkspace()).projects[0].tracks.length)
+    .toBe(0);
   await browser
     .getByRole("button", { name: "Verify and save key", exact: true })
     .click();
@@ -163,6 +181,58 @@ try {
     throw new Error("The credential file permissions are too broad.");
   await browser.getByRole("button", { name: "Continue", exact: true }).click();
   await waitCatalog(browser);
+  await expect(browser.getByRole("note")).toContainText(
+    "Import your first voiceover",
+  );
+  if (
+    !(await browser
+      .locator(".epidemic-add-result")
+      .evaluateAll((buttons) =>
+        buttons.every((button) => (button as HTMLButtonElement).disabled),
+      ))
+  )
+    throw new Error("Catalog Add was available before the first voiceover.");
+  const emptyProject = (await savedWorkspace()).projects[0];
+  const blockedImport = await page.evaluate(async (projectId) => {
+    try {
+      await window.studio.epidemicImport(
+        { id: "voiceover-gate-check", kind: "music" },
+        projectId,
+        crypto.randomUUID(),
+      );
+      return "";
+    } catch (failure) {
+      return failure instanceof Error ? failure.message : String(failure);
+    }
+  }, emptyProject.id);
+  if (!blockedImport.includes("first voiceover"))
+    throw new Error(
+      "The host did not enforce the first-voiceover import gate.",
+    );
+  await browser
+    .getByRole("button", { name: "Close Epidemic Sound browser", exact: true })
+    .click();
+  // Saved connections open the catalog directly, including an empty project.
+  browser = await openBrowser("Music 1");
+  await waitCatalog(browser);
+  await expect(browser.getByLabel("Epidemic Sound API key")).toHaveCount(0);
+  await expect(browser.locator(".epidemic-add-result").first()).toBeDisabled();
+  await browser
+    .getByRole("button", { name: "Close Epidemic Sound browser", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Quick guide", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Let’s make a mix", exact: true })
+    .click();
+  await expect(page.locator(".sentence-row")).toHaveCount(4, {
+    timeout: 90_000,
+  });
+  await page
+    .getByRole("tab", { name: "Music & Sound Track", exact: true })
+    .click();
+  browser = await openBrowser("Music 1");
+  await waitCatalog(browser);
+  await expect(browser.locator(".epidemic-add-result").first()).toBeEnabled();
   const catalog = await page.evaluate(() => window.studio.epidemicCatalog());
   if (
     catalog.genres.length < 390 ||
@@ -470,6 +540,10 @@ try {
     JSON.stringify(
       {
         realKeyVerified: true,
+        emptyProjectDirectKeyEntryAndCancel: true,
+        verificationCancelPreservesEmptyProject: true,
+        savedConnectionOpensCatalog: true,
+        firstVoiceoverImportGate: true,
         invalidKeyRejected: true,
         encryptedStorage: true,
         invalidReplacementPreservesKey: true,

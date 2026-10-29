@@ -130,6 +130,16 @@
   border-color: var(--green-line);
   box-shadow: 0 0 0 2px var(--green-soft);
 }
+:root .epidemic-voiceover-notice {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 11px 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--green-soft);
+  color: var(--secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
 :root .epidemic-search input {
   border: 0;
   outline: 0;

@@ -1,6 +1,6 @@
 {
   "name": "audio-mix-studio",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Pick your favorite sentence from every voice take. A local macOS narration editor powered by WhisperX and Codex.",
   "author": "Igor Miranda Souza",
   "license": "MIT",

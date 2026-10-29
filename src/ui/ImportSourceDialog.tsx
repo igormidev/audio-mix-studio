@@ -12,12 +12,10 @@ import "./source-choice.css";
 
 export function ImportSourceDialog({
   kind,
-  hasVoiceover,
   hasLibrary,
   onChoose,
 }: {
   kind: EpidemicKind;
-  hasVoiceover: boolean;
   hasLibrary: boolean;
   onChoose: (source: "epidemic" | "computer" | "library" | null) => void;
 }) {
@@ -86,7 +84,6 @@ export function ImportSourceDialog({
         <div className="source-choice-options">
           <button
             className="source-choice-card source-epidemic"
-            disabled={!hasVoiceover}
             onClick={() => onChoose("epidemic")}
           >
             <span className="source-choice-mark">
@@ -98,13 +95,7 @@ export function ImportSourceDialog({
               Discover music and effects, listen here, and add your favorite.
             </span>
             <span className="source-choice-foot">
-              {hasVoiceover ? (
-                <>
-                  Browse sounds <ArrowUpRight size={16} />
-                </>
-              ) : (
-                "Import your first voiceover to begin"
-              )}
+              Browse sounds <ArrowUpRight size={16} />
             </span>
           </button>
           <button

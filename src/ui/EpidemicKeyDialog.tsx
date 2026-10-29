@@ -77,14 +77,16 @@ export function EpidemicKeyForm({
   onCancel,
   onBusyChange,
   replace = false,
+  startWithKey = false,
 }: {
   onConnected: (status: EpidemicConnection) => void;
   onCancel?: () => void;
   onBusyChange?: (busy: boolean) => void;
   replace?: boolean;
+  startWithKey?: boolean;
 }) {
   const [step, setStep] = useState<"choice" | "help" | "key">(
-    replace ? "key" : "choice",
+    replace || startWithKey ? "key" : "choice",
   );
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);

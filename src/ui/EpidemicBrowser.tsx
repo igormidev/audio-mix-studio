@@ -77,6 +77,7 @@ export interface EpidemicBrowserProps {
   initialKind: EpidemicKind;
   projectId: string;
   active: boolean;
+  canImport: boolean;
   onClose: () => void;
   onSelect: (track: AudioTrack, kind: EpidemicKind) => void;
   onBusyChange?: (busy: boolean) => void;
@@ -86,6 +87,7 @@ export function EpidemicBrowser({
   initialKind,
   projectId,
   active,
+  canImport,
   onClose,
   onSelect,
   onBusyChange,
@@ -430,7 +432,7 @@ export function EpidemicBrowser({
     }
   };
   const importAudio = async (item: EpidemicResult) => {
-    if (busy) return;
+    if (busy || !canImport) return;
     stopPreview();
     const id = crypto.randomUUID();
     const run = ++importGeneration.current;
@@ -598,6 +600,7 @@ export function EpidemicBrowser({
             )}
             <EpidemicKeyForm
               replace={editingKey && connected}
+              startWithKey
               onBusyChange={(value) => {
                 setKeyBusy(value);
                 callbacks.current.onBusyChange?.(value);
@@ -707,6 +710,12 @@ export function EpidemicBrowser({
                 </select>
               )}
             </div>
+            {!canImport && (
+              <p className="epidemic-voiceover-notice" role="note">
+                Browse and preview now. Import your first voiceover before
+                adding music or sound effects to this project.
+              </p>
+            )}
             <div className="epidemic-browser-body">
               <aside
                 className="epidemic-filter-sidebar"
@@ -1225,7 +1234,12 @@ export function EpidemicBrowser({
                             </button>
                             <button
                               className="button primary epidemic-add-result"
-                              disabled={busy || loading}
+                              disabled={busy || loading || !canImport}
+                              title={
+                                canImport
+                                  ? undefined
+                                  : "Import your first voiceover before adding this audio"
+                              }
                               aria-label={`Add ${item.title} to mix`}
                               onClick={() => void importAudio(item)}
                             >

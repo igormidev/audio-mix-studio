@@ -1371,9 +1371,6 @@ export const Workspace = memo(function Workspace({
       {active && sourceRequest && (
         <ImportSourceDialog
           kind={sourceRequest.kind}
-          hasVoiceover={project.tracks.some(
-            (track) => (track.role ?? "voiceover") === "voiceover",
-          )}
           hasLibrary={project.tracks.some(
             (track) => track.role === sourceRequest.kind,
           )}
@@ -1385,6 +1382,9 @@ export const Workspace = memo(function Workspace({
           initialKind={epidemicRequest.kind}
           projectId={project.id}
           active={active}
+          canImport={project.tracks.some(
+            (track) => (track.role ?? "voiceover") === "voiceover",
+          )}
           onClose={() => setEpidemicRequest(null)}
           onSelect={selectEpidemic}
           onBusyChange={epidemicBusy}
